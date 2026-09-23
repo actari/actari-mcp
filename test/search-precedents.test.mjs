@@ -1,5 +1,5 @@
 // Тесты компактных инцидентов в search_precedents, полный вид по full: true (T6).
-// Запуск: pnpm --filter actari test (или node --test test/ из apps/mcp)
+// Запуск: pnpm --filter actari-mcp test (или node --test test/ из apps/mcp)
 
 import { test } from "node:test";
 import assert from "node:assert/strict";

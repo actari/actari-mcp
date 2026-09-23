@@ -11,7 +11,7 @@ artifact and incident projections and full-text search. If it is not
 connected, add it first:
 
 ```json
-{ "mcpServers": { "actari": { "command": "npx", "args": ["-y", "github:actari/actari-mcp"] } } }
+{ "mcpServers": { "actari": { "command": "npx", "args": ["-y", "actari-mcp"] } } }
 ```
 
 The server needs Node.js >= 22.5 and keeps its data in `~/.actari/`.

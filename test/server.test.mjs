@@ -1,6 +1,6 @@
 // Тесты actari-mcp: спавним настоящий сервер с временной базой,
 // говорим с ним по JSON-RPC через stdio — как реальный MCP-клиент.
-// Запуск: pnpm --filter actari test (или node --test test/ из apps/mcp)
+// Запуск: pnpm --filter actari-mcp test (или node --test test/ из apps/mcp)
 
 import { test } from "node:test";
 import assert from "node:assert/strict";

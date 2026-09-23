@@ -1,6 +1,6 @@
 # actari
 
-[![GitHub](https://img.shields.io/github/package-json/v/actari/actari-mcp)](https://github.com/actari/actari-mcp)
+[![npm](https://img.shields.io/npm/v/actari-mcp)](https://www.npmjs.com/package/actari-mcp)
 [![skills.sh](https://img.shields.io/badge/skills.sh-1_skill-8A2BE2)](https://skills.sh/actari/actari-mcp)
 <!-- TODO: когда каталог проиндексирует установки, вернуть живой счётчик: https://skills.sh/b/actari/actari-mcp -->
 
@@ -34,7 +34,7 @@ npx skills add actari/actari-mcp
 ```
 
 ```json
-{ "mcpServers": { "actari": { "command": "npx", "args": ["-y", "github:actari/actari-mcp"] } } }
+{ "mcpServers": { "actari": { "command": "npx", "args": ["-y", "actari-mcp"] } } }
 ```
 
 Optionally, pin the journal at the project level — copy this into your
@@ -55,7 +55,7 @@ Add the server to your `.mcp.json`:
   "mcpServers": {
     "actari": {
       "command": "npx",
-      "args": ["-y", "github:actari/actari-mcp"]
+      "args": ["-y", "actari-mcp"]
     }
   }
 }
@@ -117,7 +117,7 @@ take precedence over the file:
   "mcpServers": {
     "actari": {
       "command": "npx",
-      "args": ["-y", "github:actari/actari-mcp"],
+      "args": ["-y", "actari-mcp"],
       "env": {
         "ACTARI_SYNC_URL": "https://actari.dev",
         "ACTARI_SYNC_TOKEN": "act_..."

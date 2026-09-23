@@ -1,5 +1,5 @@
 // Тесты компактного get_task и эха актов журнала (T4).
-// Запуск: pnpm --filter actari test (или node --test test/ из apps/mcp)
+// Запуск: pnpm --filter actari-mcp test (или node --test test/ из apps/mcp)
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
