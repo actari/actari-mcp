@@ -1,9 +1,9 @@
 {
-  "name": "workhorse-ai-mcp",
-  "version": "0.12.0",
+  "name": "actari",
+  "version": "0.13.0",
   "private": false,
   "type": "module",
-  "description": "Delegation journal for orchestrator/worker AI workflows: event sourcing over SQLite with an MCP interface. Zero dependencies.",
+  "description": "Task journal for AI agents: event sourcing over SQLite with an MCP interface. Policies set the rules. Zero dependencies.",
   "keywords": [
     "mcp",
     "mcp-server",
@@ -11,29 +11,33 @@
     "event-sourcing",
     "sqlite",
     "ai-agents",
-    "orchestration"
+    "orchestration",
+    "policy"
   ],
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/workhorse-ai/workhorse-ai-mcp.git"
+    "url": "git+https://github.com/actari/actari-mcp.git"
   },
-  "homepage": "https://github.com/workhorse-ai/workhorse-ai-mcp#readme",
+  "homepage": "https://github.com/actari/actari-mcp#readme",
   "bugs": {
-    "url": "https://github.com/workhorse-ai/workhorse-ai-mcp/issues"
+    "url": "https://github.com/actari/actari-mcp/issues"
   },
   "files": [
     "server.mjs",
     "sync.mjs",
+    "policy.mjs",
+    "intent.mjs",
+    "env.mjs",
     "skills/",
     "schema.sql",
     "README.md",
     "LICENSE"
   ],
   "bin": {
-    "workhorse-ai-mcp": "server.mjs",
-    "workhorse-mcp": "server.mjs",
-    "workhorse-sync": "sync.mjs"
+    "actari": "server.mjs",
+    "actari-mcp": "server.mjs",
+    "actari-sync": "sync.mjs"
   },
   "scripts": {
     "test": "node --test \"test/*.test.mjs\""

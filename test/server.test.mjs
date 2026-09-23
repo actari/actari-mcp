@@ -1,6 +1,6 @@
-// Тесты workhorse-mcp: спавним настоящий сервер с временной базой,
+// Тесты actari-mcp: спавним настоящий сервер с временной базой,
 // говорим с ним по JSON-RPC через stdio — как реальный MCP-клиент.
-// Запуск: pnpm --filter workhorse-ai-mcp test (или node --test test/ из apps/mcp)
+// Запуск: pnpm --filter actari test (или node --test test/ из apps/mcp)
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -11,14 +11,14 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { DatabaseSync } from "node:sqlite";
 
-const ROOT = dirname(dirname(fileURLToPath(import.meta.url))); // ~/.workhorse
+const ROOT = dirname(dirname(fileURLToPath(import.meta.url))); // ~/.actari
 const SERVER = join(ROOT, "server.mjs");
 
 function startClient(t, dbPathOverride) {
-	const dir = mkdtempSync(join(tmpdir(), "workhorse-test-"));
+	const dir = mkdtempSync(join(tmpdir(), "actari-test-"));
 	const dbPath = dbPathOverride ?? join(dir, "test.db");
 	const child = spawn(process.execPath, [SERVER], {
-		env: { ...process.env, WORKHORSE_DB: dbPath },
+		env: { ...process.env, ACTARI_DB: dbPath },
 		stdio: ["pipe", "pipe", "inherit"],
 	});
 	t.after(() => child.kill());
@@ -75,12 +75,16 @@ async function bringToReported(c, taskId) {
 test("handshake: initialize, tools, prompts, instructions", async (t) => {
 	const c = startClient(t);
 	const init = (await c.call("initialize", { protocolVersion: "2024-11-05" })).result;
-	assert.equal(init.serverInfo.name, "workhorse-mcp");
+	assert.equal(init.serverInfo.name, "actari");
 	assert.ok(init.instructions.includes("REPORTED"), "initialize отдаёт протокол");
+	assert.ok(init.instructions.includes("get_policy"), "инструкции ведут к политике");
+	for (const banned of ["ОБЯЗАТЕЛЬНО", "PRECONDITION", "оркестратор"]) {
+		assert.ok(!init.instructions.includes(banned), `методологии в протоколе нет: ${banned}`);
+	}
 	assert.deepEqual(Object.keys(init.capabilities).sort(), ["prompts", "tools"]);
 
 	const tools = (await c.call("tools/list")).result.tools.map((x) => x.name);
-	assert.equal(tools.length, 22);
+	assert.equal(tools.length, 26);
 	for (const name of [
 		"search_precedents",
 		"draft_task",
@@ -95,6 +99,8 @@ test("handshake: initialize, tools, prompts, instructions", async (t) => {
 		"sync_scope",
 		"inbox",
 		"take",
+		"get_policy",
+		"set_policy",
 	])
 		assert.ok(tools.includes(name), name);
 
@@ -109,15 +115,13 @@ test("handshake: initialize, tools, prompts, instructions", async (t) => {
 	const boot = (
 		await c.call("prompts/get", { name: "bootstrap", arguments: { project: "dom-pro" } })
 	).result;
-	assert.ok(
-		boot.messages[0].content.text.includes("Project baseline:"),
-		"bootstrap ведёт к артефакту baseline",
-	);
+	assert.ok(boot.messages[0].content.text.includes("get_policy"), "bootstrap ведёт к политике");
+	assert.ok(boot.messages[0].content.text.includes('"dom-pro"'), "проект подставлен");
 });
 
-test("чистый старт: WORKHORSE_DB в несуществующей вложенной директории", async (t) => {
-	const dir = mkdtempSync(join(tmpdir(), "workhorse-clean-"));
-	const dbPath = join(dir, "no", "such", "dir", "workhorse.db");
+test("чистый старт: ACTARI_DB в несуществующей вложенной директории", async (t) => {
+	const dir = mkdtempSync(join(tmpdir(), "actari-clean-"));
+	const dbPath = join(dir, "no", "such", "dir", "actari.db");
 	assert.equal(existsSync(dirname(dbPath)), false, "директории заведомо нет");
 
 	const c = startClient(t, dbPath);
@@ -148,12 +152,13 @@ test("жизненный цикл: draft → delegate → report → accept", as
 
 	r = await c.tool("submit_report", { task_id: id, report: "тест падал -> прошёл" });
 	assert.equal(r.data.status, "REPORTED");
-	assert.equal(r.data.report_text, "тест падал -> прошёл");
+	assert.equal(r.data.has_report, true);
+	assert.equal(r.data.report_length, "тест падал -> прошёл".length);
 
-	r = await c.tool("accept", { task_id: id, verify_commit: "abc1234" });
+	r = await c.tool("accept", { task_id: id, evidence: "abc1234" });
 	assert.equal(r.data.status, "ACCEPTED");
 	assert.equal(r.data.outcome, "accepted");
-	assert.equal(r.data.verify_commit, "abc1234");
+	assert.equal(r.data.evidence, "abc1234");
 
 	const hist = await c.tool("get_task", { task_id: id });
 	assert.deepEqual(
@@ -169,7 +174,7 @@ test("недопустимые переходы отбиваются", async (t)
 
 	await c.tool("draft_task", { task_id: id, project: "test", title: "т", task_text: "x" });
 
-	let r = await c.tool("accept", { task_id: id, verify_commit: "x" });
+	let r = await c.tool("accept", { task_id: id, evidence: "x" });
 	assert.equal(r.ok, false);
 	assert.match(r.error, /недопустим из статуса DRAFT/);
 
@@ -180,7 +185,7 @@ test("недопустимые переходы отбиваются", async (t)
 	r = await c.tool("delegate", { task_id: id, executor: "grok" });
 	assert.equal(r.ok, false, "повторная делегация из DELEGATED");
 
-	r = await c.tool("accept", { task_id: "test/ghost", verify_commit: "x" });
+	r = await c.tool("accept", { task_id: "test/ghost", evidence: "x" });
 	assert.equal(r.ok, false);
 	assert.match(r.error, /не найдена/);
 });
@@ -197,7 +202,7 @@ test("rework: возврат на доработку и повторный ци�
 	assert.equal(r.data.status, "DELEGATED", "из REWORK можно делегировать снова");
 
 	await c.tool("submit_report", { task_id: id, report: "дофикс, 385/385" });
-	r = await c.tool("accept", { task_id: id, verify_commit: "def5678" });
+	r = await c.tool("accept", { task_id: id, evidence: "def5678" });
 	assert.equal(r.data.status, "ACCEPTED");
 });
 
@@ -239,7 +244,7 @@ test("draft_task: guards id и slug", async (t) => {
 
 	const id = "test/redraft";
 	await bringToReported(c, id);
-	await c.tool("accept", { task_id: id, verify_commit: "x" });
+	await c.tool("accept", { task_id: id, evidence: "x" });
 	r = await c.tool("draft_task", { task_id: id, project: "test", title: "т2", task_text: "y" });
 	assert.equal(r.ok, false, "принятую задачу нельзя перечертить");
 	assert.match(r.error, /уже в статусе ACCEPTED/);
@@ -309,9 +314,9 @@ test("list_tasks: фильтры по статусу и проекту", async (
 test("артефакты: запись, версии, выборка, поиск", async (t) => {
 	const c = startClient(t);
 
-	await reg(c, "workhorse");
+	await reg(c, "journal-demo");
 	let r = await c.tool("record_artifact", {
-		project: "workhorse",
+		project: "journal-demo",
 		kind: "spec",
 		title: "Формат журнала",
 		body: "event sourcing поверх sqlite, проекции триггерами",
@@ -320,7 +325,7 @@ test("артефакты: запись, версии, выборка, поиск
 	const v1 = r.data.id;
 
 	r = await c.tool("record_artifact", {
-		project: "workhorse",
+		project: "journal-demo",
 		kind: "spec",
 		title: "Формат журнала",
 		body: "версия 2: добавлены артефакты и маппинг на облако",
@@ -345,7 +350,7 @@ test("артефакты: запись, версии, выборка, поиск
 	});
 	assert.equal(r.data.task_id, "test/linked");
 
-	r = await c.tool("list_artifacts", { project: "workhorse", kind: "spec" });
+	r = await c.tool("list_artifacts", { project: "journal-demo", kind: "spec" });
 	assert.equal(r.data.length, 2);
 	assert.ok(!("body" in r.data[0]), "список без тел");
 
@@ -375,7 +380,7 @@ test("связи задач: continues/discovered_from, guards", async (t) => {
 	const c = startClient(t);
 	const oldId = "test/finished-work";
 	await bringToReported(c, oldId);
-	await c.tool("accept", { task_id: oldId, verify_commit: "abc" });
+	await c.tool("accept", { task_id: oldId, evidence: "abc" });
 
 	const newId = "test/follow-up";
 	await c.tool("draft_task", {

@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// workhorse-sync — пушер журнала в облако Workhorse AI.
+// actari-sync — пушер журнала в облако Actari.
 // Направление строго вверх: GET курсор → POST батчи событий с seq > курсора.
 // Zero deps: node:sqlite (read-only) + встроенный fetch. Ошибки возвращаются
 // значением ({error}), исключения наружу не летят — пушер никогда не роняет журнал.
@@ -10,34 +10,36 @@ import { homedir, hostname, userInfo } from "node:os";
 import { join, dirname } from "node:path";
 import { pathToFileURL } from "node:url";
 
+import { readEnv } from "./env.mjs";
+
 export const BATCH_SIZE = 200;
 
 // События уровня проекта (не привязанные к задаче) живут под этим task_id.
 export const GENERAL_TASK_ID = "_general";
 
-// Данные под бренд Workhorse AI: директория по бренду, файл по смыслу.
-export const DEFAULT_DB_DIR = ".workhorse-ai";
+// Данные под бренд Actari: директория по бренду, файл по смыслу.
+export const DEFAULT_DB_DIR = ".actari";
 export const DEFAULT_DB_FILE = "journal.db";
 
 // Единственный резолвер пути к базе (сервер и CLI пушера используют его же):
-// WORKHORSE_DB перекрывает всё, иначе ~/.workhorse-ai/journal.db.
+// ACTARI_DB перекрывает всё, иначе ~/.actari/journal.db.
 // Чистая функция — env и homedir подменяемы, тестируется без реальной ФС.
 export function resolveDbPath({ env = process.env, homedir: home = homedir() } = {}) {
-	return env.WORKHORSE_DB ?? join(home, DEFAULT_DB_DIR, DEFAULT_DB_FILE);
+	return readEnv("DB", { env }) ?? join(home, DEFAULT_DB_DIR, DEFAULT_DB_FILE);
 }
 
 // Конфиг синка: JSON-файл рядом с базой (sync.json), путь переопределяется
-// WORKHORSE_SYNC_CONFIG. Две формы:
+// ACTARI_SYNC_CONFIG. Две формы:
 //   1) одна цель (как было): {url, token, journalId};
 //   2) несколько целей: {targets: [{alias, url, token, journalId}, ...]}.
-// env-переменные WORKHORSE_SYNC_URL / TOKEN / JOURNAL_ID описывают ОДНУ цель:
+// env-переменные ACTARI_SYNC_URL / TOKEN / JOURNAL_ID описывают ОДНУ цель:
 // при плоском конфиге они перекрывают его поля (как и раньше), а при списке
 // targets игнорируются со строкой в лог — перекрыть список одной парой
 // url/token нечем, а молча слать журнал ещё и в env-цель нельзя.
 // Нет ни файла, ни env → синк выключен (пустой список) — это норма.
 export function syncConfigPath({ dbPath, env = process.env } = {}) {
 	const resolvedDbPath = dbPath ?? resolveDbPath({ env });
-	return env.WORKHORSE_SYNC_CONFIG ?? join(dirname(resolvedDbPath), "sync.json");
+	return readEnv("SYNC_CONFIG", { env }) ?? join(dirname(resolvedDbPath), "sync.json");
 }
 
 // Сырой конфиг из файла: объект либо null (файла нет / не парсится / не объект).
@@ -48,7 +50,7 @@ export function readSyncConfigFile({ dbPath, env = process.env, log = console.er
 		const parsed = JSON.parse(readFileSync(configPath, "utf8"));
 		return typeof parsed === "object" && parsed !== null && !Array.isArray(parsed) ? parsed : null;
 	} catch {
-		log(`workhorse-sync: конфиг не парсится, игнорирую: ${configPath}`);
+		log(`actari-sync: конфиг не парсится, игнорирую: ${configPath}`);
 		return null;
 	}
 }
@@ -102,14 +104,14 @@ export function loadSyncTargets({ dbPath, env = process.env, log = console.error
 	const listed = Array.isArray(fileConfig.targets)
 		? fileConfig.targets.filter((t) => t && typeof t === "object" && !Array.isArray(t))
 		: null;
-	const envUrl = env.WORKHORSE_SYNC_URL;
-	const envToken = env.WORKHORSE_SYNC_TOKEN;
-	const envJournalId = env.WORKHORSE_SYNC_JOURNAL_ID;
+	const envUrl = readEnv("SYNC_URL", { env });
+	const envToken = readEnv("SYNC_TOKEN", { env });
+	const envJournalId = readEnv("SYNC_JOURNAL_ID", { env });
 
 	if (listed && listed.length > 0) {
 		if (envUrl || envToken || envJournalId) {
 			log(
-				"workhorse-sync: в конфиге список targets — WORKHORSE_SYNC_URL/TOKEN/JOURNAL_ID " +
+				"actari-sync: в конфиге список targets — ACTARI_SYNC_URL/TOKEN/JOURNAL_ID " +
 					"игнорируются (env описывает только одну цель)",
 			);
 		}
@@ -135,7 +137,7 @@ export function loadSyncConfig({ dbPath, env = process.env, log = console.error 
 }
 
 // Запись конфига синка по тому же пути, откуда его читает loadSyncTargets
-// (WORKHORSE_SYNC_CONFIG ?? sync.json рядом с базой). Перезапись существующего
+// (ACTARI_SYNC_CONFIG ?? sync.json рядом с базой). Перезапись существующего
 // файла — осознанное действие пользователя (connect).
 // Возвращает путь записанного файла.
 export function writeSyncConfig({ dbPath, env = process.env, config }) {
@@ -162,23 +164,24 @@ export function defaultJournalId({ username, host } = {}) {
 // Пути эндпоинтов — деталь реализации сервера, а не пользователя: в конфиге
 // живёт БАЗОВЫЙ адрес инстанса (облако или on-premise, в том числе за
 // реверс-прокси с префиксом), а конкретные пути выводятся здесь.
-// Управляемое облако Workhorse AI — адрес по умолчанию, когда url не задан.
-// Перекрывается WORKHORSE_CLOUD_URL (полезно для стейджинга и своих сборок).
-export const DEFAULT_CLOUD_URL = "https://app.workhorse-ai.dev";
+// Управляемое облако Actari — адрес по умолчанию, когда url не задан.
+// Перекрывается ACTARI_CLOUD_URL (полезно для стейджинга и своих сборок).
+export const DEFAULT_CLOUD_URL = "https://actari.dev";
 
 export function resolveCloudUrl({ url, env = process.env } = {}) {
-	return url ?? env.WORKHORSE_CLOUD_URL ?? DEFAULT_CLOUD_URL;
+	return url ?? readEnv("CLOUD_URL", { env }) ?? DEFAULT_CLOUD_URL;
 }
 
 export const SYNC_PATH = "/api/mcp/journal-sync";
 export const INBOX_PATH = "/api/mcp/journal-inbox";
+export const POLICY_PATH = "/api/mcp/journal-policy";
 
-// Принимает и базу («https://wh.acme.internal», «https://tools.acme.com/workhorse»),
+// Принимает и базу («https://wh.acme.internal», «https://tools.acme.com/actari»),
 // и полный эндпоинт — последнее нужно для конфигов, написанных до 0.8.1.
 export function normalizeBaseUrl(input) {
 	const url = new URL(input);
 	let path = url.pathname.replace(/\/+$/, "");
-	for (const suffix of [SYNC_PATH, INBOX_PATH]) {
+	for (const suffix of [SYNC_PATH, INBOX_PATH, POLICY_PATH]) {
 		if (path.toLowerCase().endsWith(suffix)) {
 			path = path.slice(0, -suffix.length);
 			break;
@@ -198,6 +201,10 @@ export function inboxUrlFromBase(base) {
 	return `${normalizeBaseUrl(base)}${INBOX_PATH}`;
 }
 
+export function policyUrlFromBase(base) {
+	return `${normalizeBaseUrl(base)}${POLICY_PATH}`;
+}
+
 // Совместимость со старым именем: принимает что угодно из двух форм.
 export function inboxUrlFromSyncUrl(input) {
 	return inboxUrlFromBase(input);
@@ -211,7 +218,7 @@ export function inboxUrlFromSyncUrl(input) {
 //
 // Токен личный: GET курсора отдаёт ВСЕ пространства пользователя, и область
 // вычисляется для каждого. Приоритет источников:
-//   1. WORKHORSE_SYNC_PROJECTS — только при единственном пространстве
+//   1. ACTARI_SYNC_PROJECTS — только при единственном пространстве
 //      (env называет проекты, но не адресата);
 //   2. projects.cloud_workspace_id == id пространства (маппинг из sync_scope);
 //   3. маппинга нет ни у одного проекта: одно пространство → шлём всё туда
@@ -299,7 +306,7 @@ export function writeSyncState({ dbPath, env = process.env, projects, key = null
 	return path;
 }
 
-// WORKHORSE_SYNC_PROJECTS="acme-web, acme-api" → ["acme-web", "acme-api"].
+// ACTARI_SYNC_PROJECTS="acme-web, acme-api" → ["acme-web", "acme-api"].
 // Пустая строка/пробелы = переменная не задана (иначе опечатка молча вырубила бы синк).
 export function parseSyncProjects(value) {
 	if (typeof value !== "string") return null;
@@ -331,7 +338,7 @@ export function eventProject({ taskId, type, payload }) {
 // «в это пространство не уедет ничего».
 //
 // Токен личный, пространств у пользователя может быть несколько (workspaceCount):
-//   - WORKHORSE_SYNC_PROJECTS применяется только при ЕДИНСТВЕННОМ пространстве —
+//   - ACTARI_SYNC_PROJECTS применяется только при ЕДИНСТВЕННОМ пространстве —
 //     env называет проекты, но не адресата, при нескольких пространствах он
 //     неоднозначен (предупреждение, дальше решает маппинг);
 //   - маппинга нет ни у одного проекта: одно пространство → шлём всё туда
@@ -343,13 +350,13 @@ export function resolveSyncScope({
 	workspaceId = null,
 	workspaceCount = 1,
 } = {}) {
-	const fromEnv = parseSyncProjects(env.WORKHORSE_SYNC_PROJECTS);
+	const fromEnv = parseSyncProjects(readEnv("SYNC_PROJECTS", { env }));
 	if (fromEnv && workspaceCount === 1) {
 		return { projects: new Set(fromEnv), source: "env", warning: null };
 	}
 	const envWarning =
 		fromEnv && workspaceCount > 1
-			? "WORKHORSE_SYNC_PROJECTS игнорируется: пространств несколько, адресат " +
+			? "ACTARI_SYNC_PROJECTS игнорируется: пространств несколько, адресат " +
 				"неоднозначен — привяжите проекты инструментом sync_scope."
 			: null;
 
@@ -363,7 +370,7 @@ export function resolveSyncScope({
 					envWarning,
 					"область синка не задана: ни у одного проекта нет cloud_workspace_id — " +
 						"в пространство уедут ВСЕ проекты журнала. Ограничить: инструмент sync_scope " +
-						"или переменная WORKHORSE_SYNC_PROJECTS.",
+						"или переменная ACTARI_SYNC_PROJECTS.",
 				]
 					.filter(Boolean)
 					.join(" "),
@@ -451,7 +458,7 @@ export function parseWorkspaces(body) {
 // Отдельно от pushJournal, потому что список пространств нужен и инструменту
 // sync_scope — локально его знать неоткуда, единственный источник — ответ
 // облака на токен.
-export async function fetchCursor({ config }) {
+export async function fetchCursor({ config, timeoutMs }) {
 	if (!config?.url || !config?.token || !config?.journalId) {
 		return { error: "конфиг синка неполный: нужны url, token и journalId" };
 	}
@@ -464,6 +471,7 @@ export async function fetchCursor({ config }) {
 				"cache-control": "no-store",
 				pragma: "no-cache",
 			},
+			...(timeoutMs ? { signal: AbortSignal.timeout(timeoutMs) } : {}),
 		});
 		if (!res.ok) return { error: `GET курсора: HTTP ${res.status}` };
 		const body = await res.json();
@@ -492,7 +500,7 @@ function persistScope({ dbPath, env, projects, key, log }) {
 	try {
 		writeSyncState({ dbPath, env, projects, key });
 	} catch (err) {
-		log(`workhorse-sync: не удалось записать состояние области: ${err.message}`);
+		log(`actari-sync: не удалось записать состояние области: ${err.message}`);
 	}
 }
 
@@ -532,7 +540,7 @@ export async function pushToTarget({ dbPath, target: config, env = process.env, 
 			return { error: "GET курсора: облако не вернуло workspaces (несовместимая версия сервера)" };
 		}
 		if (workspaces.length === 0) {
-			log("workhorse-sync: у пользователя нет пространств — журнал слать некуда");
+			log("actari-sync: у пользователя нет пространств — журнал слать некуда");
 			return { pushed: 0, lastSeq: 0, workspaces: [] };
 		}
 
@@ -579,7 +587,7 @@ export async function pushToTarget({ dbPath, target: config, env = process.env, 
 			});
 			if (scope.warning && !seenWarnings.has(scope.warning)) {
 				seenWarnings.add(scope.warning);
-				log(`workhorse-sync: ${scope.warning}`);
+				log(`actari-sync: ${scope.warning}`);
 			}
 
 			// Ключ состояния области — id пространства: расширение области у
@@ -595,7 +603,7 @@ export async function pushToTarget({ dbPath, target: config, env = process.env, 
 			const from = rescan ? 0 : ws.lastSeq;
 			if (rescan) {
 				wsLog(
-					"workhorse-sync: область синка расширилась — пересинхронизация с нуля " +
+					"actari-sync: область синка расширилась — пересинхронизация с нуля " +
 						"(облако отбросит дубли по seq)",
 				);
 			}
@@ -604,13 +612,13 @@ export async function pushToTarget({ dbPath, target: config, env = process.env, 
 			const rows = beyond.filter((event) => shouldSyncEvent(event, scope.projects));
 			if (scope.projects) {
 				wsLog(
-					`workhorse-sync: область — ${scope.source === "env" ? "WORKHORSE_SYNC_PROJECTS" : "маппинг"}: ` +
+					`actari-sync: область — ${scope.source === "env" ? "ACTARI_SYNC_PROJECTS" : "маппинг"}: ` +
 						`${[...scope.projects].join(", ") || "(пусто)"}; отфильтровано ${beyond.length - rows.length} из ${beyond.length}`,
 				);
 			}
 			// Область текущего пуша — её запишем в состояние после успеха.
 			const scopeForState = scope.projects ? [...scope.projects] : null;
-			wsLog(`workhorse-sync: событий за курсором ${from}: ${rows.length}`);
+			wsLog(`actari-sync: событий за курсором ${from}: ${rows.length}`);
 
 			if (rows.length === 0) {
 				persistScope({ dbPath, env, projects: scopeForState, key: stateKey, log: wsLog });
@@ -621,6 +629,9 @@ export async function pushToTarget({ dbPath, target: config, env = process.env, 
 			let cursor = ws.lastSeq;
 			let pushed = 0;
 			let wsError = null;
+			// Предупреждения ingest (план 1 §8.6): событие принято, но что-то в нём
+			// не сошлось с облаком — агент должен узнать, а не гадать.
+			const warnings = [];
 			for (let i = 0; i < rows.length; i += BATCH_SIZE) {
 				const batch = rows.slice(i, i + BATCH_SIZE);
 				const res = await fetch(syncUrlFromBase(config.url), {
@@ -637,19 +648,35 @@ export async function pushToTarget({ dbPath, target: config, env = process.env, 
 					break;
 				}
 				const result = await res.json();
+				for (const warning of Array.isArray(result.warnings) ? result.warnings : []) {
+					warnings.push({ ...warning, workspace: ws.slug });
+				}
 				cursor = result.lastSeq ?? batch[batch.length - 1].seq;
 				pushed += batch.length;
-				wsLog(`workhorse-sync: батч ${batch.length}, курсор облака ${cursor}`);
+				wsLog(`actari-sync: батч ${batch.length}, курсор облака ${cursor}`);
 			}
 			if (wsError) {
-				wsLog(`workhorse-sync: пространство не синхронизировано: ${wsError}`);
-				results.push({ id: ws.id, slug: ws.slug, pushed, lastSeq: cursor, error: wsError });
+				wsLog(`actari-sync: пространство не синхронизировано: ${wsError}`);
+				results.push({
+					id: ws.id,
+					slug: ws.slug,
+					pushed,
+					lastSeq: cursor,
+					error: wsError,
+					...(warnings.length > 0 ? { warnings } : {}),
+				});
 				continue;
 			}
 			// Состояние пишем только после полного успеха: оборвался пуш — область
 			// не зафиксирована, следующий заход при необходимости повторит пересинк.
 			persistScope({ dbPath, env, projects: scopeForState, key: stateKey, log: wsLog });
-			results.push({ id: ws.id, slug: ws.slug, pushed, lastSeq: cursor });
+			results.push({
+				id: ws.id,
+				slug: ws.slug,
+				pushed,
+				lastSeq: cursor,
+				...(warnings.length > 0 ? { warnings } : {}),
+			});
 		}
 
 		const failed = results.filter((r) => r.error);
@@ -702,7 +729,8 @@ export async function pushJournal({ dbPath, config, targets, env = process.env, 
 		} catch (err) {
 			result = { error: err instanceof Error ? err.message : String(err) };
 		}
-		if (result.error) targetLog(`workhorse-sync: цель не синхронизирована: ${result.error}`);
+		if (result.error) targetLog(`actari-sync: цель не синхронизирована: ${result.error}`);
+		const warnings = (result.workspaces ?? []).flatMap((ws) => ws.warnings ?? []);
 		results.push({
 			alias: target.alias,
 			url: target.url,
@@ -710,6 +738,7 @@ export async function pushJournal({ dbPath, config, targets, env = process.env, 
 			workspaces: result.workspaces ?? [],
 			pushed: result.pushed ?? 0,
 			lastSeq: result.lastSeq,
+			...(warnings.length > 0 ? { warnings } : {}),
 			...(result.error ? { error: result.error } : {}),
 		});
 	}
@@ -729,7 +758,7 @@ export async function pushJournal({ dbPath, config, targets, env = process.env, 
 	return summary;
 }
 
-// ============ CLI: node sync.mjs / workhorse-sync ============
+// ============ CLI: node sync.mjs / actari-sync ============
 
 const isCli = process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href;
 
@@ -738,7 +767,7 @@ if (isCli) {
 	const targets = loadSyncTargets({ dbPath });
 	if (targets.length === 0) {
 		console.error(
-			"workhorse-sync: синк не настроен — нет sync.json рядом с базой и нет WORKHORSE_SYNC_URL/TOKEN/JOURNAL_ID",
+			"actari-sync: синк не настроен — нет sync.json рядом с базой и нет ACTARI_SYNC_URL/TOKEN/JOURNAL_ID",
 		);
 		process.exit(1);
 	}
@@ -746,7 +775,7 @@ if (isCli) {
 	if (targets.length === 1) {
 		const [only] = result.targets;
 		if (only.error) {
-			console.error(`workhorse-sync: ${only.error}`);
+			console.error(`actari-sync: ${only.error}`);
 			process.exit(1);
 		}
 		console.log(`отправлено ${only.pushed}, курсор ${only.lastSeq}`);

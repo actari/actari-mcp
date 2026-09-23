@@ -1,11 +1,11 @@
 {
-	"name": "workhorse-ai",
-	"version": "0.9.0",
-	"description": "Your AI is the workhorse, you are the orchestrator. A delegation journal (MCP over SQLite, event sourcing) plus three discipline skills: orchestrator, worker, and solo. Key invariant: REPORTED (the worker believes it is done) ≠ ACCEPTED (verified by the orchestrator's own test run).",
+	"name": "actari",
+	"version": "0.13.0",
+	"description": "A task journal for AI agents (MCP over SQLite, event sourcing) plus the protocol skill. Statuses: REPORTED (the executor believes it is done) ≠ ACCEPTED (confirmed by a check). The rules of drafting, reporting and accepting come from a per-project policy, not from the package.",
 	"author": {
 		"name": "Aleksey Nikitin",
 		"email": "kvandake@gmail.com"
 	},
-	"homepage": "https://github.com/workhorse-ai/workhorse-ai-mcp",
+	"homepage": "https://github.com/actari/actari-mcp",
 	"license": "MIT"
 }

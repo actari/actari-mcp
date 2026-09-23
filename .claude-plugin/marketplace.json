@@ -1,15 +1,15 @@
 {
-	"name": "workhorse-ai",
-	"description": "Workhorse AI — the delegation journal and its orchestration discipline",
+	"name": "actari",
+	"description": "Actari — the task journal for AI agents and its policies",
 	"owner": {
 		"name": "Aleksey Nikitin",
 		"email": "kvandake@gmail.com"
 	},
 	"plugins": [
 		{
-			"name": "workhorse-ai",
-			"version": "0.9.0",
-			"description": "Delegation journal (MCP over SQLite) plus the discipline skill: REPORTED ≠ ACCEPTED, mandatory bootstrap, acceptance proven by your own test run.",
+			"name": "actari",
+			"version": "0.13.0",
+			"description": "Task journal (MCP over SQLite) plus the protocol skill. Rules come from a per-project policy: local policy.json or the cloud workspace.",
 			"source": "./",
 			"author": {
 				"name": "Aleksey Nikitin",

@@ -1,4 +1,4 @@
--- workhorse.db — журнал делегирования оркестратор ↔ рабочая лошадка
+-- actari.db — журнал делегирования оркестратор ↔ рабочая лошадка
 -- Event sourcing в миниатюре: events — источник истины (append-only),
 -- tasks/incidents — материализованные проекции, обновляются триггерами.
 
@@ -13,7 +13,7 @@ CREATE TABLE IF NOT EXISTS events (
                 'TaskDrafted',      -- payload: project, title, task_text
                 'Delegated',        -- payload: executor
                 'ReportSubmitted',  -- payload: report
-                'Accepted',         -- payload: outcome, verify_commit
+                'Accepted',         -- payload: outcome, evidence
                 'ReworkRequested',  -- payload: reason
                 'Failed',           -- payload: reason
                 'IncidentRecorded', -- payload: description, lesson
@@ -89,7 +89,7 @@ CREATE TABLE IF NOT EXISTS tasks (
     report_text   TEXT,
     status        TEXT,  -- DRAFT / DELEGATED / REPORTED / ACCEPTED / REWORK / FAILED
     outcome       TEXT,  -- accepted / reworked / failed
-    verify_commit TEXT,
+    evidence      TEXT,  -- чем подтверждена приёмка: хэш коммита, ссылка на прогон
     executor      TEXT,
     created_at    TEXT,
     updated_at    TEXT
@@ -104,7 +104,7 @@ CREATE TABLE IF NOT EXISTS incidents (
 );
 
 -- Реестр проектов: имя = неймспейс задач, root_path = привязка к папке на диске,
--- cloud_workspace_id = маппинг на пространство в облаке Workhorse AI (задачи/артефакты/доки
+-- cloud_workspace_id = маппинг на пространство в облаке Actari (задачи/артефакты/доки
 -- наследуют workspace через проект). Перерегистрация = обновление.
 CREATE TABLE IF NOT EXISTS projects (
     name                 TEXT PRIMARY KEY,
@@ -176,7 +176,7 @@ WHEN NEW.type = 'Accepted'
 BEGIN
     UPDATE tasks SET status = 'ACCEPTED',
                      outcome = coalesce(json_extract(NEW.payload, '$.outcome'), 'accepted'),
-                     verify_commit = json_extract(NEW.payload, '$.verify_commit'),
+                     evidence = json_extract(NEW.payload, '$.evidence'),
                      updated_at = NEW.at
     WHERE task_id = NEW.task_id;
 END;

@@ -1,4 +1,4 @@
-// Тесты пушера синка workhorse → облако Workhorse AI.
+// Тесты пушера синка actari → облако Actari.
 // Облако — in-process мок на node:http (контракт journal-sync: GET список
 // пространств пользователя с курсорами, POST батч с workspaceId и проверкой
 // членства, идемпотентность по seq, auth Authorization: Bearer <token>).
@@ -58,7 +58,7 @@ const OTHER_WS = { id: OTHER_WORKSPACE, slug: OTHER_WORKSPACE_SLUG, name: "Other
 // ============ фикстуры ============
 
 function tmpDir() {
-	return mkdtempSync(join(tmpdir(), "workhorse-sync-test-"));
+	return mkdtempSync(join(tmpdir(), "actari-sync-test-"));
 }
 
 function openDb(dbPath) {
@@ -81,7 +81,7 @@ function makeJournalDb(dir) {
 	raw("test/a", "TaskDrafted", { project: "test", title: "Задача А", task_text: "сделать" });
 	raw("test/a", "Delegated", { executor: "grok" });
 	raw("test/a", "ReportSubmitted", { report: "готово" });
-	raw("test/a", "Accepted", { outcome: "accepted", verify_commit: "abc1234" });
+	raw("test/a", "Accepted", { outcome: "accepted", evidence: "abc1234" });
 	raw("test/b", "TaskDrafted", { project: "test", title: "Задача Б", task_text: "ещё" });
 	raw("test/b", "Delegated", { executor: "subagent" });
 	raw("_general", "IncidentRecorded", { description: "грабли", lesson: "урок" });
@@ -156,7 +156,14 @@ function countEvents(dbPath) {
 
 function startMockCloud(
 	t,
-	{ token = TOKEN, workspaces = [ALPHA_WS], legacy = false, forbidPostTo = [] } = {},
+	{
+		token = TOKEN,
+		workspaces = [ALPHA_WS],
+		legacy = false,
+		forbidPostTo = [],
+		// (events, workspaceId) → предупреждения ingest, как у облака плана 1
+		postWarnings = null,
+	} = {},
 ) {
 	const state = {
 		workspaces,
@@ -179,6 +186,9 @@ function startMockCloud(
 		};
 		if (state.lastAuth !== `Bearer ${token}`)
 			return send(401, { error: "Invalid or revoked MCP token" });
+		if (req.method === "GET" && url.pathname.endsWith("/journal-policy")) {
+			return send(200, { workspaces: state.workspaces });
+		}
 		if (req.method === "GET") {
 			state.gets += 1;
 			state.cursorPath = url.pathname;
@@ -229,7 +239,13 @@ function startMockCloud(
 					if (e.seq > cursor) cursor = e.seq;
 				}
 				state.cursors.set(k, cursor);
-				send(200, { applied, skipped, lastSeq: cursor });
+				const warnings = postWarnings ? postWarnings(events, workspaceId) : [];
+				send(200, {
+					applied,
+					skipped,
+					lastSeq: cursor,
+					...(warnings.length > 0 ? { warnings } : {}),
+				});
 			});
 			return;
 		}
@@ -268,16 +284,16 @@ async function waitFor(fn, { timeout = 4000, step = 25 } = {}) {
 	return false;
 }
 
-// env без унаследованных WORKHORSE_SYNC_* (чтобы окружение машины не влияло)
+// env без унаследованных ACTARI_SYNC_* (чтобы окружение машины не влияло)
 function cleanEnv(extra = {}) {
 	const env = { ...process.env };
 	for (const k of [
-		"WORKHORSE_SYNC_URL",
-		"WORKHORSE_SYNC_TOKEN",
-		"WORKHORSE_SYNC_JOURNAL_ID",
-		"WORKHORSE_SYNC_CONFIG",
-		"WORKHORSE_SYNC_PROJECTS",
-		"WORKHORSE_DB",
+		"ACTARI_SYNC_URL",
+		"ACTARI_SYNC_TOKEN",
+		"ACTARI_SYNC_JOURNAL_ID",
+		"ACTARI_SYNC_CONFIG",
+		"ACTARI_SYNC_PROJECTS",
+		"ACTARI_DB",
 	])
 		delete env[k];
 	return { ...env, ...extra };
@@ -363,15 +379,15 @@ test("loadSyncConfig: файл sync.json рядом с базой + env-пере
 
 	config = loadSyncConfig({
 		dbPath,
-		env: { WORKHORSE_SYNC_URL: "http://env", WORKHORSE_SYNC_JOURNAL_ID: "j-env" },
+		env: { ACTARI_SYNC_URL: "http://env", ACTARI_SYNC_JOURNAL_ID: "j-env" },
 		log: () => {},
 	});
 	assert.deepEqual(config, { url: "http://env", token: "t-file", journalId: "j-env" });
 
-	// явный путь конфига через WORKHORSE_SYNC_CONFIG
+	// явный путь конфига через ACTARI_SYNC_CONFIG
 	const altPath = join(dir, "alt.json");
 	writeFileSync(altPath, JSON.stringify({ url: "http://alt", token: "t-alt", journalId: "j-alt" }));
-	config = loadSyncConfig({ dbPath, env: { WORKHORSE_SYNC_CONFIG: altPath }, log: () => {} });
+	config = loadSyncConfig({ dbPath, env: { ACTARI_SYNC_CONFIG: altPath }, log: () => {} });
 	assert.equal(config.url, "http://alt");
 });
 
@@ -380,15 +396,15 @@ test("loadSyncConfig: url и token из env — journalId выводится с�
 	const config = loadSyncConfig({
 		dbPath: join(dir, "x.db"),
 		env: {
-			WORKHORSE_SYNC_URL: "https://app.workhorse-ai.dev",
-			WORKHORSE_SYNC_TOKEN: "t-env",
+			ACTARI_SYNC_URL: "https://app.actari.test",
+			ACTARI_SYNC_TOKEN: "t-env",
 		},
 		log: () => {},
 	});
 
 	// Настройка через env в .mcp.json не должна требовать выдумывать
 	// идентификатор журнала: иначе синк падал бы на «конфиг неполный».
-	assert.equal(config.url, "https://app.workhorse-ai.dev");
+	assert.equal(config.url, "https://app.actari.test");
 	assert.equal(config.token, "t-env");
 	assert.equal(config.journalId, defaultJournalId());
 });
@@ -424,9 +440,9 @@ test("writeSyncConfig: пишет sync.json рядом с базой, loadSyncCo
 	});
 	assert.equal(JSON.parse(readFileSync(path, "utf8")).journalId, "j-2");
 
-	// WORKHORSE_SYNC_CONFIG переопределяет путь записи так же, как путь чтения
+	// ACTARI_SYNC_CONFIG переопределяет путь записи так же, как путь чтения
 	const altPath = join(dir, "alt.json");
-	const written = writeSyncConfig({ dbPath, env: { WORKHORSE_SYNC_CONFIG: altPath }, config });
+	const written = writeSyncConfig({ dbPath, env: { ACTARI_SYNC_CONFIG: altPath }, config });
 	assert.equal(written, altPath);
 	assert.equal(JSON.parse(readFileSync(altPath, "utf8")).token, "t-1");
 });
@@ -507,6 +523,30 @@ test("pushJournal: полный пуш с нуля, повтор, докат", a
 	r = await pushJournal({ dbPath, config });
 	assertOneTarget(r, { pushed: 3, lastSeq: 13 });
 	assert.equal(cloudCursor(cloud), 13);
+});
+
+test("pushJournal: предупреждения облака доходят до результата с пространством", async (t) => {
+	const dir = tmpDir();
+	const dbPath = makeJournalDb(dir);
+	const cloud = await startMockCloud(t, {
+		postWarnings: (events) =>
+			events
+				.filter((event) => event.seq === 3)
+				.map((event) => ({ seq: event.seq, code: "intent_not_found", intentTaskId: "intent-x" })),
+	});
+	const config = { url: cloud.url, token: TOKEN, journalId: JOURNAL };
+
+	const first = await pushJournal({ dbPath, config });
+	const expected = [
+		{ seq: 3, code: "intent_not_found", intentTaskId: "intent-x", workspace: WORKSPACE_SLUG },
+	];
+	assert.deepEqual(first.targets[0].warnings, expected);
+	assert.deepEqual(first.targets[0].workspaces[0].warnings, expected);
+
+	// Нечего слать — предупреждений нет, и поля нет вовсе
+	const second = await pushJournal({ dbPath, config });
+	assert.equal("warnings" in second.targets[0], false);
+	assert.equal("warnings" in second.targets[0].workspaces[0], false);
 });
 
 test("pushJournal: батчи по 200 (несколько POST)", async (t) => {
@@ -598,10 +638,10 @@ test("CLI: успешный пуш → stdout и exit 0", async (t) => {
 
 	const { code, stdout } = await runCli(
 		cleanEnv({
-			WORKHORSE_DB: dbPath,
-			WORKHORSE_SYNC_URL: cloud.url,
-			WORKHORSE_SYNC_TOKEN: TOKEN,
-			WORKHORSE_SYNC_JOURNAL_ID: JOURNAL,
+			ACTARI_DB: dbPath,
+			ACTARI_SYNC_URL: cloud.url,
+			ACTARI_SYNC_TOKEN: TOKEN,
+			ACTARI_SYNC_JOURNAL_ID: JOURNAL,
 		}),
 	);
 	assert.equal(code, 0);
@@ -611,7 +651,7 @@ test("CLI: успешный пуш → stdout и exit 0", async (t) => {
 test("CLI: синк не настроен → exit 1 с понятной ошибкой", async () => {
 	const dir = tmpDir();
 	const dbPath = makeJournalDb(dir); // sync.json рядом нет
-	const { code, stderr } = await runCli(cleanEnv({ WORKHORSE_DB: dbPath }));
+	const { code, stderr } = await runCli(cleanEnv({ ACTARI_DB: dbPath }));
 	assert.equal(code, 1);
 	assert.match(stderr, /синк не настроен/);
 });
@@ -621,14 +661,14 @@ test("CLI: недоступное облако → exit 1", async () => {
 	const dbPath = makeJournalDb(dir);
 	const { code, stderr } = await runCli(
 		cleanEnv({
-			WORKHORSE_DB: dbPath,
-			WORKHORSE_SYNC_URL: await deadEndpoint(),
-			WORKHORSE_SYNC_TOKEN: TOKEN,
-			WORKHORSE_SYNC_JOURNAL_ID: JOURNAL,
+			ACTARI_DB: dbPath,
+			ACTARI_SYNC_URL: await deadEndpoint(),
+			ACTARI_SYNC_TOKEN: TOKEN,
+			ACTARI_SYNC_JOURNAL_ID: JOURNAL,
 		}),
 	);
 	assert.equal(code, 1);
-	assert.match(stderr, /workhorse-sync:/);
+	assert.match(stderr, /actari-sync:/);
 });
 
 // ============ MCP-инструмент sync и авто-пуш ============
@@ -641,22 +681,22 @@ test("MCP sync: инструмент отвечает текстом; без к�
 	const configured = startMcp(
 		t,
 		cleanEnv({
-			WORKHORSE_DB: dbPath,
-			WORKHORSE_SYNC_URL: cloud.url,
-			WORKHORSE_SYNC_TOKEN: TOKEN,
-			WORKHORSE_SYNC_JOURNAL_ID: JOURNAL,
+			ACTARI_DB: dbPath,
+			ACTARI_SYNC_URL: cloud.url,
+			ACTARI_SYNC_TOKEN: TOKEN,
+			ACTARI_SYNC_JOURNAL_ID: JOURNAL,
 		}),
 	);
 	const tools = (await configured.call("tools/list")).result.tools.map((x) => x.name);
 	assert.ok(tools.includes("sync"), "инструмент sync объявлен");
 
 	let r = await configured.tool("sync", {});
-	assert.equal(r.text, "отправлено 10 событий, курсор 10");
+	assert.equal(r.text, "отправлено 10 событий, курсор 10\nполитика пространств: обновлено 0");
 	r = await configured.tool("sync", {});
-	assert.equal(r.text, "отправлено 0 событий, курсор 10");
+	assert.equal(r.text, "отправлено 0 событий, курсор 10\nполитика пространств: обновлено 0");
 
 	const dir2 = tmpDir();
-	const unconfigured = startMcp(t, cleanEnv({ WORKHORSE_DB: makeJournalDb(dir2) }));
+	const unconfigured = startMcp(t, cleanEnv({ ACTARI_DB: makeJournalDb(dir2) }));
 	r = await unconfigured.tool("sync", {});
 	assert.equal(r.text, "синк не настроен (нет sync.json)");
 });
@@ -666,10 +706,10 @@ test("MCP sync: ошибка облака → текст ошибки, серв�
 	const c = startMcp(
 		t,
 		cleanEnv({
-			WORKHORSE_DB: makeJournalDb(dir),
-			WORKHORSE_SYNC_URL: await deadEndpoint(),
-			WORKHORSE_SYNC_TOKEN: TOKEN,
-			WORKHORSE_SYNC_JOURNAL_ID: JOURNAL,
+			ACTARI_DB: makeJournalDb(dir),
+			ACTARI_SYNC_URL: await deadEndpoint(),
+			ACTARI_SYNC_TOKEN: TOKEN,
+			ACTARI_SYNC_JOURNAL_ID: JOURNAL,
 		}),
 	);
 	const r = await c.tool("sync", {});
@@ -685,11 +725,11 @@ test("авто-пуш: запись события уезжает в облак�
 	const c = startMcp(
 		t,
 		cleanEnv({
-			WORKHORSE_DB: dbPath,
-			WORKHORSE_SCHEMA: SCHEMA,
-			WORKHORSE_SYNC_URL: cloud.url,
-			WORKHORSE_SYNC_TOKEN: TOKEN,
-			WORKHORSE_SYNC_JOURNAL_ID: JOURNAL,
+			ACTARI_DB: dbPath,
+			ACTARI_SCHEMA: SCHEMA,
+			ACTARI_SYNC_URL: cloud.url,
+			ACTARI_SYNC_TOKEN: TOKEN,
+			ACTARI_SYNC_JOURNAL_ID: JOURNAL,
 		}),
 	);
 
@@ -710,11 +750,11 @@ test("авто-пуш: недоступное облако не блокируе
 	const c = startMcp(
 		t,
 		cleanEnv({
-			WORKHORSE_DB: join(dir, "offline.db"),
-			WORKHORSE_SCHEMA: SCHEMA,
-			WORKHORSE_SYNC_URL: await deadEndpoint(),
-			WORKHORSE_SYNC_TOKEN: TOKEN,
-			WORKHORSE_SYNC_JOURNAL_ID: JOURNAL,
+			ACTARI_DB: join(dir, "offline.db"),
+			ACTARI_SCHEMA: SCHEMA,
+			ACTARI_SYNC_URL: await deadEndpoint(),
+			ACTARI_SYNC_TOKEN: TOKEN,
+			ACTARI_SYNC_JOURNAL_ID: JOURNAL,
 		}),
 	);
 
@@ -739,7 +779,7 @@ test("MCP connect: успех → sync.json написан рядом с баз�
 	const dbPath = makeJournalDb(dir); // 10 событий
 	const configPath = join(dir, "sync.json");
 	const cloud = await startMockCloud(t);
-	const c = startMcp(t, cleanEnv({ WORKHORSE_DB: dbPath }));
+	const c = startMcp(t, cleanEnv({ ACTARI_DB: dbPath }));
 
 	const r = await c.tool("connect", {
 		url: cloud.url,
@@ -773,7 +813,7 @@ test("MCP connect: плохой токен → 401, конфиг НЕ запис
 	const dbPath = makeJournalDb(dir);
 	const configPath = join(dir, "sync.json");
 	const cloud = await startMockCloud(t);
-	const c = startMcp(t, cleanEnv({ WORKHORSE_DB: dbPath }));
+	const c = startMcp(t, cleanEnv({ ACTARI_DB: dbPath }));
 
 	const r = await c.tool("connect", { url: cloud.url, token: "wrong", journal_id: "j" });
 	assert.match(r.text, /^не подключено: HTTP 401 — токен не принят/);
@@ -791,7 +831,7 @@ test("MCP connect: облако старого контракта → не по�
 	const dbPath = makeJournalDb(dir);
 	const configPath = join(dir, "sync.json");
 	const cloud = await startMockCloud(t, { legacy: true });
-	const c = startMcp(t, cleanEnv({ WORKHORSE_DB: dbPath }));
+	const c = startMcp(t, cleanEnv({ ACTARI_DB: dbPath }));
 
 	const r = await c.tool("connect", { url: cloud.url, token: TOKEN, journal_id: "j" });
 	assert.match(r.text, /^не подключено: облако не вернуло workspaces/);
@@ -803,7 +843,7 @@ test("MCP connect: дефолтный journal_id — нормализованн�
 	const dbPath = makeJournalDb(dir);
 	const configPath = join(dir, "sync.json");
 	const cloud = await startMockCloud(t);
-	const c = startMcp(t, cleanEnv({ WORKHORSE_DB: dbPath }));
+	const c = startMcp(t, cleanEnv({ ACTARI_DB: dbPath }));
 
 	const expected = defaultJournalId();
 	const r = await c.tool("connect", { url: cloud.url, token: TOKEN });
@@ -815,10 +855,7 @@ test("MCP connect: дефолтный journal_id — нормализованн�
 
 test("авто-пуш: без конфига — тихий no-op (ни строки в stderr)", async (t) => {
 	const dir = tmpDir();
-	const c = startMcp(
-		t,
-		cleanEnv({ WORKHORSE_DB: join(dir, "plain.db"), WORKHORSE_SCHEMA: SCHEMA }),
-	);
+	const c = startMcp(t, cleanEnv({ ACTARI_DB: join(dir, "plain.db"), ACTARI_SCHEMA: SCHEMA }));
 	await c.tool("register_project", { name: "plain", root_path: "/tmp/plain" });
 	await c.tool("draft_task", { project: "plain", slug: "one", title: "т", task_text: "x" });
 	// даём setImmediate-хвостам отработать
@@ -832,18 +869,15 @@ test("normalizeBaseUrl: голая база, префикс прокси, пол
 	assert.equal(normalizeBaseUrl("https://wh.acme.internal"), "https://wh.acme.internal");
 	assert.equal(normalizeBaseUrl("https://wh.acme.internal/"), "https://wh.acme.internal");
 	// On-premise за реверс-прокси: префикс пути обязан сохраниться.
-	assert.equal(
-		normalizeBaseUrl("https://tools.acme.com/workhorse/"),
-		"https://tools.acme.com/workhorse",
-	);
+	assert.equal(normalizeBaseUrl("https://tools.acme.com/actari/"), "https://tools.acme.com/actari");
 	// Совместимость: конфиги до 0.8.1 хранили полный адрес эндпоинта.
 	assert.equal(
 		normalizeBaseUrl("https://wh.acme.internal/api/mcp/journal-sync"),
 		"https://wh.acme.internal",
 	);
 	assert.equal(
-		normalizeBaseUrl("https://tools.acme.com/workhorse/api/mcp/journal-sync"),
-		"https://tools.acme.com/workhorse",
+		normalizeBaseUrl("https://tools.acme.com/actari/api/mcp/journal-sync"),
+		"https://tools.acme.com/actari",
 	);
 	// Внутренняя сеть: http и нестандартный порт — валидная база.
 	assert.equal(normalizeBaseUrl("http://10.0.0.5:3300"), "http://10.0.0.5:3300");
@@ -851,12 +885,12 @@ test("normalizeBaseUrl: голая база, префикс прокси, пол
 
 test("syncUrlFromBase / inboxUrlFromBase: пути выводятся, префикс не теряется", () => {
 	assert.equal(
-		syncUrlFromBase("https://tools.acme.com/workhorse"),
-		"https://tools.acme.com/workhorse/api/mcp/journal-sync",
+		syncUrlFromBase("https://tools.acme.com/actari"),
+		"https://tools.acme.com/actari/api/mcp/journal-sync",
 	);
 	assert.equal(
-		inboxUrlFromBase("https://tools.acme.com/workhorse"),
-		"https://tools.acme.com/workhorse/api/mcp/journal-inbox",
+		inboxUrlFromBase("https://tools.acme.com/actari"),
+		"https://tools.acme.com/actari/api/mcp/journal-inbox",
 	);
 	// Старое имя принимает полный эндпоинт и отдаёт соседний.
 	assert.equal(
@@ -891,12 +925,12 @@ test("pushJournal: работает от базы и просит не кеши�
 test("resolveCloudUrl: без url — управляемое облако, env перекрывает, явный url главнее", () => {
 	assert.equal(resolveCloudUrl({ env: {} }), DEFAULT_CLOUD_URL);
 	assert.equal(
-		resolveCloudUrl({ env: { WORKHORSE_CLOUD_URL: "https://staging.workhorse-ai.dev" } }),
-		"https://staging.workhorse-ai.dev",
+		resolveCloudUrl({ env: { ACTARI_CLOUD_URL: "https://staging.actari.test" } }),
+		"https://staging.actari.test",
 	);
 	// On-premise: явный адрес перебивает и дефолт, и env.
 	assert.equal(
-		resolveCloudUrl({ url: "https://wh.acme.internal", env: { WORKHORSE_CLOUD_URL: "https://x" } }),
+		resolveCloudUrl({ url: "https://wh.acme.internal", env: { ACTARI_CLOUD_URL: "https://x" } }),
 		"https://wh.acme.internal",
 	);
 });
@@ -946,7 +980,7 @@ test("eventProject: проект события выводится для каж
 });
 
 test("parseSyncProjects: список через запятую, пустая строка = не задано", () => {
-	assert.deepEqual(parseSyncProjects("planado, dom-pro"), ["planado", "dom-pro"]);
+	assert.deepEqual(parseSyncProjects("actari, dom-pro"), ["actari", "dom-pro"]);
 	assert.deepEqual(parseSyncProjects("one"), ["one"]);
 	assert.equal(parseSyncProjects(""), null);
 	assert.equal(parseSyncProjects("  ,  "), null);
@@ -961,7 +995,7 @@ test("resolveSyncScope: env (одно пространство) > маппинг
 
 	// 1. env — явное намерение человека при ЕДИНСТВЕННОМ пространстве
 	const byEnv = resolveSyncScope({
-		env: { WORKHORSE_SYNC_PROJECTS: "beta" },
+		env: { ACTARI_SYNC_PROJECTS: "beta" },
 		projects,
 		workspaceId: WORKSPACE,
 		workspaceCount: 1,
@@ -995,14 +1029,14 @@ test("resolveSyncScope: несколько пространств — env игн
 
 	// env при нескольких пространствах не применяется: адресат неоднозначен.
 	const envIgnored = resolveSyncScope({
-		env: { WORKHORSE_SYNC_PROJECTS: "beta" },
+		env: { ACTARI_SYNC_PROJECTS: "beta" },
 		projects,
 		workspaceId: WORKSPACE,
 		workspaceCount: 2,
 	});
 	assert.equal(envIgnored.source, "mapping", "решает маппинг, не env");
 	assert.deepEqual([...envIgnored.projects], ["alpha"]);
-	assert.match(envIgnored.warning, /WORKHORSE_SYNC_PROJECTS игнорируется/);
+	assert.match(envIgnored.warning, /ACTARI_SYNC_PROJECTS игнорируется/);
 
 	// маппинга нет ни у одного проекта и пространств несколько → пустая
 	// область (не уедет НИЧЕГО) с просьбой sync_scope: приватность важнее.
@@ -1048,14 +1082,14 @@ test("shouldSyncEvent: общее и ProjectRegistered при активной �
 	);
 });
 
-test("pushJournal: WORKHORSE_SYNC_PROJECTS ограничивает область (одно пространство)", async (t) => {
+test("pushJournal: ACTARI_SYNC_PROJECTS ограничивает область (одно пространство)", async (t) => {
 	const dir = tmpDir();
 	const dbPath = makeMultiProjectDb(dir);
 	const cloud = await startMockCloud(t);
 
 	const r = await pushJournal({
 		dbPath,
-		env: { WORKHORSE_SYNC_PROJECTS: "alpha" },
+		env: { ACTARI_SYNC_PROJECTS: "alpha" },
 		config: { url: cloud.baseUrl, token: TOKEN, journalId: JOURNAL },
 	});
 
@@ -1065,7 +1099,7 @@ test("pushJournal: WORKHORSE_SYNC_PROJECTS ограничивает област
 	assert.deepEqual(appliedSeqs(cloud), [3, 4, 8]);
 });
 
-test("pushJournal: WORKHORSE_SYNC_PROJECTS при двух пространствах игнорируется с предупреждением", async (t) => {
+test("pushJournal: ACTARI_SYNC_PROJECTS при двух пространствах игнорируется с предупреждением", async (t) => {
 	const dir = tmpDir();
 	const dbPath = makeMultiProjectDb(dir, {
 		mappings: { alpha: WORKSPACE, beta: OTHER_WORKSPACE },
@@ -1075,7 +1109,7 @@ test("pushJournal: WORKHORSE_SYNC_PROJECTS при двух пространст�
 
 	const r = await pushJournal({
 		dbPath,
-		env: { WORKHORSE_SYNC_PROJECTS: "beta" },
+		env: { ACTARI_SYNC_PROJECTS: "beta" },
 		config: { url: cloud.baseUrl, token: TOKEN, journalId: JOURNAL },
 		log: (line) => lines.push(line),
 	});
@@ -1086,7 +1120,7 @@ test("pushJournal: WORKHORSE_SYNC_PROJECTS при двух пространст�
 	assert.deepEqual(appliedSeqs(cloud, { workspaceId: WORKSPACE }), [3, 4, 8]);
 	assert.deepEqual(appliedSeqs(cloud, { workspaceId: OTHER_WORKSPACE }), [5, 6]);
 	assert.ok(
-		lines.some((line) => /WORKHORSE_SYNC_PROJECTS игнорируется/.test(line)),
+		lines.some((line) => /ACTARI_SYNC_PROJECTS игнорируется/.test(line)),
 		"молча игнорировать env нельзя",
 	);
 });
@@ -1281,10 +1315,10 @@ test("CLI: env-конфиг без sync.json покрывает оба прос�
 
 	const { code, stdout } = await runCli(
 		cleanEnv({
-			WORKHORSE_DB: dbPath,
-			WORKHORSE_SYNC_URL: cloud.baseUrl,
-			WORKHORSE_SYNC_TOKEN: TOKEN,
-			WORKHORSE_SYNC_JOURNAL_ID: JOURNAL,
+			ACTARI_DB: dbPath,
+			ACTARI_SYNC_URL: cloud.baseUrl,
+			ACTARI_SYNC_TOKEN: TOKEN,
+			ACTARI_SYNC_JOURNAL_ID: JOURNAL,
 		}),
 	);
 	assert.equal(code, 0);
@@ -1303,7 +1337,7 @@ test("курсор: расширение области → пересинхро
 
 	// Область = alpha: курсор облака уезжает на 8, события beta (5,6) остаются
 	// ПОЗАДИ курсора — курсор пары (пространство, журнал) один.
-	let r = await pushJournal({ dbPath, env: { WORKHORSE_SYNC_PROJECTS: "alpha" }, config });
+	let r = await pushJournal({ dbPath, env: { ACTARI_SYNC_PROJECTS: "alpha" }, config });
 	assert.deepEqual(appliedSeqs(cloud), [3, 4, 8]);
 	assert.equal(r.lastSeq, 8);
 	assert.deepEqual(readSyncState({ dbPath }).projects, ["alpha"], "область зафиксирована");
@@ -1312,7 +1346,7 @@ test("курсор: расширение области → пересинхро
 	const lines = [];
 	r = await pushJournal({
 		dbPath,
-		env: { WORKHORSE_SYNC_PROJECTS: "alpha,beta" },
+		env: { ACTARI_SYNC_PROJECTS: "alpha,beta" },
 		config,
 		log: (line) => lines.push(line),
 	});
@@ -1327,13 +1361,13 @@ test("курсор: сужение области пересинка не тре
 	const cloud = await startMockCloud(t);
 	const config = { url: cloud.baseUrl, token: TOKEN, journalId: JOURNAL };
 
-	await pushJournal({ dbPath, env: { WORKHORSE_SYNC_PROJECTS: "alpha,beta" }, config });
+	await pushJournal({ dbPath, env: { ACTARI_SYNC_PROJECTS: "alpha,beta" }, config });
 	const postsAfterFirst = cloud.state.posts;
 
 	const lines = [];
 	const r = await pushJournal({
 		dbPath,
-		env: { WORKHORSE_SYNC_PROJECTS: "alpha" },
+		env: { ACTARI_SYNC_PROJECTS: "alpha" },
 		config,
 		log: (line) => lines.push(line),
 	});
@@ -1358,7 +1392,7 @@ test("MCP sync_scope: показывает область по простран�
 	const dir = tmpDir();
 	const dbPath = join(dir, "journal.db");
 	const cloud = await startMockCloud(t);
-	const c = startMcp(t, cleanEnv({ WORKHORSE_DB: dbPath, WORKHORSE_SCHEMA: SCHEMA }));
+	const c = startMcp(t, cleanEnv({ ACTARI_DB: dbPath, ACTARI_SCHEMA: SCHEMA }));
 
 	await c.tool("register_project", { name: "alpha", root_path: "/tmp/alpha" });
 	await c.tool("register_project", { name: "beta", root_path: "/tmp/beta", force: true });
@@ -1387,7 +1421,7 @@ test("MCP sync_scope: два пространства — привязка по 
 	const dir = tmpDir();
 	const dbPath = join(dir, "journal.db");
 	const cloud = await startMockCloud(t, { workspaces: [ALPHA_WS, OTHER_WS] });
-	const c = startMcp(t, cleanEnv({ WORKHORSE_DB: dbPath, WORKHORSE_SCHEMA: SCHEMA }));
+	const c = startMcp(t, cleanEnv({ ACTARI_DB: dbPath, ACTARI_SCHEMA: SCHEMA }));
 
 	await c.tool("register_project", { name: "alpha", root_path: "/tmp/alpha" });
 	await c.tool("register_project", { name: "beta", root_path: "/tmp/beta", force: true });
@@ -1440,7 +1474,7 @@ test("MCP sync_scope: незарегистрированный проект — 
 	const dir = tmpDir();
 	const dbPath = join(dir, "journal.db");
 	const cloud = await startMockCloud(t);
-	const c = startMcp(t, cleanEnv({ WORKHORSE_DB: dbPath, WORKHORSE_SCHEMA: SCHEMA }));
+	const c = startMcp(t, cleanEnv({ ACTARI_DB: dbPath, ACTARI_SCHEMA: SCHEMA }));
 
 	await c.tool("register_project", { name: "alpha", root_path: "/tmp/alpha" });
 	await c.tool("connect", { url: cloud.baseUrl, token: TOKEN, journal_id: JOURNAL });
@@ -1454,7 +1488,7 @@ test("MCP connect: несколько проектов без области —
 	const dir = tmpDir();
 	const dbPath = join(dir, "journal.db");
 	const cloud = await startMockCloud(t);
-	const c = startMcp(t, cleanEnv({ WORKHORSE_DB: dbPath, WORKHORSE_SCHEMA: SCHEMA }));
+	const c = startMcp(t, cleanEnv({ ACTARI_DB: dbPath, ACTARI_SCHEMA: SCHEMA }));
 
 	await c.tool("register_project", { name: "alpha", root_path: "/tmp/alpha" });
 	await c.tool("register_project", { name: "beta", root_path: "/tmp/beta", force: true });
@@ -1468,7 +1502,7 @@ test("MCP connect: несколько пространств без маппин
 	const dir = tmpDir();
 	const dbPath = join(dir, "journal.db");
 	const cloud = await startMockCloud(t, { workspaces: [ALPHA_WS, OTHER_WS] });
-	const c = startMcp(t, cleanEnv({ WORKHORSE_DB: dbPath, WORKHORSE_SCHEMA: SCHEMA }));
+	const c = startMcp(t, cleanEnv({ ACTARI_DB: dbPath, ACTARI_SCHEMA: SCHEMA }));
 
 	await c.tool("register_project", { name: "alpha", root_path: "/tmp/alpha" });
 
@@ -1487,7 +1521,7 @@ test("MCP connect: без url подключается к облаку по ум
 	const cloud = await startMockCloud(t);
 	// Подменяем адрес управляемого облака на мок: проверяется сам факт, что
 	// url не обязателен, без похода в сеть.
-	const c = startMcp(t, cleanEnv({ WORKHORSE_DB: dbPath, WORKHORSE_CLOUD_URL: cloud.baseUrl }));
+	const c = startMcp(t, cleanEnv({ ACTARI_DB: dbPath, ACTARI_CLOUD_URL: cloud.baseUrl }));
 
 	const r = await c.tool("connect", { token: TOKEN, journal_id: "default-cloud" });
 
@@ -1523,7 +1557,7 @@ test("loadSyncTargets: плоский конфиг старого формата
 	// Поведение env-перекрытий не изменилось ни на йоту.
 	const overridden = loadSyncTargets({
 		dbPath,
-		env: { WORKHORSE_SYNC_URL: "http://env", WORKHORSE_SYNC_JOURNAL_ID: "j-env" },
+		env: { ACTARI_SYNC_URL: "http://env", ACTARI_SYNC_JOURNAL_ID: "j-env" },
 		log: () => {},
 	});
 	assert.equal(overridden.length, 1);
@@ -1540,8 +1574,8 @@ test("loadSyncTargets: список targets, уникальные алиасы, 
 		JSON.stringify({
 			targets: [
 				{ alias: "acme", url: "https://wh.acme.internal", token: "t1", journalId: "j" },
-				{ url: "https://app.workhorse-ai.dev", token: "t2", journalId: "j" },
-				{ url: "https://app.workhorse-ai.dev", token: "t3", journalId: "j2" },
+				{ url: "https://app.actari.test", token: "t2", journalId: "j" },
+				{ url: "https://app.actari.test", token: "t3", journalId: "j2" },
 			],
 		}),
 	);
@@ -1549,13 +1583,13 @@ test("loadSyncTargets: список targets, уникальные алиасы, 
 	const lines = [];
 	const targets = loadSyncTargets({
 		dbPath,
-		env: { WORKHORSE_SYNC_URL: "http://env", WORKHORSE_SYNC_TOKEN: "t-env" },
+		env: { ACTARI_SYNC_URL: "http://env", ACTARI_SYNC_TOKEN: "t-env" },
 		log: (line) => lines.push(line),
 	});
 
 	assert.deepEqual(
 		targets.map((t) => t.alias),
-		["acme", "app.workhorse-ai.dev", "app.workhorse-ai.dev#2"],
+		["acme", "app.actari.test", "app.actari.test#2"],
 		"алиасы уникальны — ими человек адресует цель",
 	);
 	assert.equal(
@@ -1564,7 +1598,7 @@ test("loadSyncTargets: список targets, уникальные алиасы, 
 		"env не превращается в тайную третью цель",
 	);
 	assert.ok(
-		lines.some((line) => /WORKHORSE_SYNC_URL\/TOKEN\/JOURNAL_ID/.test(line)),
+		lines.some((line) => /ACTARI_SYNC_URL\/TOKEN\/JOURNAL_ID/.test(line)),
 		"игнорирование env — со строкой в лог, не молча",
 	);
 });
@@ -1714,7 +1748,7 @@ test("совместимость: плоский sync.json без env — пуш
 		JSON.stringify({ url: cloud.baseUrl, token: TOKEN, journalId: JOURNAL }),
 	);
 
-	const { code, stdout } = await runCli(cleanEnv({ WORKHORSE_DB: dbPath }));
+	const { code, stdout } = await runCli(cleanEnv({ ACTARI_DB: dbPath }));
 	assert.equal(code, 0);
 	assert.match(stdout, /отправлено 10, курсор 10/);
 	assert.equal(cloudCursor(cloud), 10);
@@ -1725,7 +1759,7 @@ test("MCP: две цели — sync_scope по каждой, привязка п
 	const dbPath = join(dir, "journal.db");
 	const acme = await startMockCloud(t);
 	const lab = await startMockCloud(t, { workspaces: [OTHER_WS] });
-	const c = startMcp(t, cleanEnv({ WORKHORSE_DB: dbPath, WORKHORSE_SCHEMA: SCHEMA }));
+	const c = startMcp(t, cleanEnv({ ACTARI_DB: dbPath, ACTARI_SCHEMA: SCHEMA }));
 
 	// Проекты и задачи заводим ДО настройки синка: seq 1,2 — ProjectRegistered,
 	// 3 — задача alpha, 4 — задача beta.
@@ -1786,7 +1820,7 @@ test("MCP connect: alias добавляет вторую цель, без alias 
 	const configPath = join(dir, "sync.json");
 	const first = await startMockCloud(t);
 	const second = await startMockCloud(t, { workspaces: [OTHER_WS] });
-	const c = startMcp(t, cleanEnv({ WORKHORSE_DB: dbPath }));
+	const c = startMcp(t, cleanEnv({ ACTARI_DB: dbPath }));
 
 	await c.tool("connect", { url: first.baseUrl, token: TOKEN, journal_id: "j1" });
 	assert.deepEqual(JSON.parse(readFileSync(configPath, "utf8")), {
@@ -1837,7 +1871,7 @@ test("авто-пуш: мёртвая цель — строка в stderr, жи�
 			],
 		}),
 	);
-	const c = startMcp(t, cleanEnv({ WORKHORSE_DB: dbPath, WORKHORSE_SCHEMA: SCHEMA }));
+	const c = startMcp(t, cleanEnv({ ACTARI_DB: dbPath, ACTARI_SCHEMA: SCHEMA }));
 
 	const r = await c.tool("register_project", { name: "auto", root_path: "/tmp/auto" });
 	assert.equal(r.ok, true, "запись проходит, несмотря на мёртвую цель");

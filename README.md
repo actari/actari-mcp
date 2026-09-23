@@ -1,48 +1,49 @@
-# workhorse-ai-mcp
+# actari
 
-[![npm](https://img.shields.io/npm/v/workhorse-ai-mcp)](https://www.npmjs.com/package/workhorse-ai-mcp)
-[![skills.sh](https://img.shields.io/badge/skills.sh-3_skills-8A2BE2)](https://skills.sh/workhorse-ai/workhorse-ai-mcp)
-<!-- TODO: когда каталог проиндексирует установки, вернуть живой счётчик: https://skills.sh/b/workhorse-ai/workhorse-ai-mcp -->
+[![GitHub](https://img.shields.io/github/package-json/v/actari/actari-mcp)](https://github.com/actari/actari-mcp)
+[![skills.sh](https://img.shields.io/badge/skills.sh-1_skill-8A2BE2)](https://skills.sh/actari/actari-mcp)
+<!-- TODO: когда каталог проиндексирует установки, вернуть живой счётчик: https://skills.sh/b/actari/actari-mcp -->
 
-**Your AI is the workhorse. You are the orchestrator.**
+**A task journal for AI agents. The rules are yours.**
 
-A delegation journal for orchestrator/worker AI workflows: an append-only
-event log over SQLite (tasks, reports, artifacts, incidents, full-text
-search) exposed as an MCP server. Zero dependencies — only Node.js >= 22.5
-with the built-in `node:sqlite`.
+An append-only event log over SQLite (tasks, reports, artifacts, incidents,
+full-text search) exposed as an MCP server. Zero dependencies — only
+Node.js >= 22.5 with the built-in `node:sqlite`.
 
-The journal enforces a simple discipline: `DRAFT → DELEGATED → REPORTED →
-ACCEPTED | REWORK | FAILED`, where *reported* (the worker thinks it is done)
-is never the same as *accepted* (the orchestrator verified it).
+The journal knows one thing for sure: `DRAFT → DELEGATED → REPORTED →
+ACCEPTED | REWORK | FAILED`, where *reported* (the executor believes it is
+done) is never the same as *accepted* (confirmed by a check). Everything
+else — what a task must contain, what a report must show, what counts as
+acceptance — is a **policy**: data you set per project or per cloud
+workspace, not opinions baked into the package.
 
 ## Quick start
 
 **Claude Code — two commands** (installs the MCP server *and* the skill):
 
 ```bash
-claude plugin marketplace add https://github.com/workhorse-ai/workhorse-ai-mcp
-claude plugin install workhorse-ai@workhorse-ai
+claude plugin marketplace add https://github.com/actari/actari-mcp
+claude plugin install actari@actari
 ```
 
 **Any other agent** — install the skill, then add the MCP server to your
 agent's MCP config:
 
 ```bash
-npx skills add workhorse-ai/workhorse-ai-mcp
+npx skills add actari/actari-mcp
 ```
 
 ```json
-{ "mcpServers": { "workhorse": { "command": "npx", "args": ["-y", "workhorse-ai-mcp"] } } }
+{ "mcpServers": { "actari": { "command": "npx", "args": ["-y", "github:actari/actari-mcp"] } } }
 ```
 
-Optionally, pin the rule at the project level — copy this into your
+Optionally, pin the journal at the project level — copy this into your
 `AGENTS.md` / `CLAUDE.md`:
 
 ```markdown
-Delegation goes through the `workhorse` MCP journal. Worker duties:
-`search_precedents` before starting, `record_artifact` (progress notes)
-along the way, `submit_report` at the end. Never commit and never accept
-your own work — acceptance requires the orchestrator's own test run.
+Delegated work is recorded in the `actari` MCP journal: `draft_task` →
+`delegate` → `submit_report` → `accept`. The rules for each step come from
+`get_policy { project }` and are echoed in the tool descriptions.
 ```
 
 ## Install
@@ -52,9 +53,9 @@ Add the server to your `.mcp.json`:
 ```json
 {
   "mcpServers": {
-    "workhorse": {
+    "actari": {
       "command": "npx",
-      "args": ["-y", "workhorse-ai-mcp"]
+      "args": ["-y", "github:actari/actari-mcp"]
     }
   }
 }
@@ -65,7 +66,7 @@ Or run it straight from a checkout:
 ```json
 {
   "mcpServers": {
-    "workhorse": {
+    "actari": {
       "command": "node",
       "args": ["apps/mcp/server.mjs"]
     }
@@ -73,20 +74,24 @@ Or run it straight from a checkout:
 }
 ```
 
-Data lives in `~/.workhorse-ai/journal.db` (override with `WORKHORSE_DB`).
+Data lives in `~/.actari/journal.db` (override with `ACTARI_DB`).
 On first start the server creates the directory and the database itself.
 `sync.json` always sits next to the database.
 
 ## Connect to the cloud (optional)
 
-`connect` needs only a token — the managed Workhorse AI cloud is the default.
+`connect` needs only a token — the managed Actari cloud is the default.
 The token is **personal** (a PAT, like on GitHub): one token covers every
 workspace you are a member of, and the journal is routed between them by
 `sync_scope`:
 
 ```
-connect { "token": "wh_..." }
+connect { "token": "act_..." }
 ```
+
+A human can cancel, close or take back an intent and change its acceptance
+criteria; the server then refuses the next act and says why. `intent_status`
+shows the intent; `release_intent` gives a taken intent back.
 
 ### Self-hosted (on-premise)
 
@@ -94,12 +99,12 @@ Pass the **base URL** of your instance; endpoint paths are derived by the server
 so a reverse-proxy prefix works as-is:
 
 ```
-connect { "url": "https://workhorse.acme.internal", "token": "wh_..." }
-connect { "url": "https://tools.acme.com/workhorse", "token": "wh_..." }
+connect { "url": "https://actari.acme.internal", "token": "act_..." }
+connect { "url": "https://tools.acme.com/actari", "token": "act_..." }
 ```
 
 The resolved base is stored in `sync.json` next to the database. To point every
-run at your instance without passing a URL, set `WORKHORSE_CLOUD_URL`.
+run at your instance without passing a URL, set `ACTARI_CLOUD_URL`.
 
 ### Configure from `.mcp.json` instead
 
@@ -110,20 +115,20 @@ take precedence over the file:
 ```json
 {
   "mcpServers": {
-    "workhorse": {
+    "actari": {
       "command": "npx",
-      "args": ["-y", "workhorse-ai-mcp"],
+      "args": ["-y", "github:actari/actari-mcp"],
       "env": {
-        "WORKHORSE_SYNC_URL": "https://app.workhorse-ai.dev",
-        "WORKHORSE_SYNC_TOKEN": "wh_..."
+        "ACTARI_SYNC_URL": "https://actari.dev",
+        "ACTARI_SYNC_TOKEN": "act_..."
       }
     }
   }
 }
 ```
 
-`WORKHORSE_SYNC_URL` takes the same **base URL** as `connect`. The journal id
-defaults to `<user>-<host>`; override it with `WORKHORSE_SYNC_JOURNAL_ID` when
+`ACTARI_SYNC_URL` takes the same **base URL** as `connect`. The journal id
+defaults to `<user>-<host>`; override it with `ACTARI_SYNC_JOURNAL_ID` when
 one machine feeds several journals.
 
 ### Several workspaces at once
@@ -135,18 +140,18 @@ its own cursor and its own scope:
 ```json
 {
   "targets": [
-    { "alias": "acme", "url": "https://wh.acme.internal", "token": "wh_...", "journalId": "kv-mac" },
-    { "alias": "lab",  "url": "https://app.workhorse-ai.dev", "token": "wh_...", "journalId": "kv-mac" }
+    { "alias": "acme", "url": "https://wh.acme.internal", "token": "act_...", "journalId": "kv-mac" },
+    { "alias": "lab",  "url": "https://actari.dev", "token": "act_...", "journalId": "kv-mac" }
   ]
 }
 ```
 
-`connect { "alias": "lab", "token": "wh_..." }` adds a target instead of
+`connect { "alias": "lab", "token": "act_..." }` adds a target instead of
 replacing the config. On a flat config without an `alias` it overwrites, exactly
 as before; once a `targets` list exists it replaces only its own entry — matched
 by alias, or by url plus journal id — and leaves the neighbours alone. The
 flat single-target form (`{url, token, journalId}`) keeps working untouched, and
-so do the `WORKHORSE_SYNC_*` variables — they describe one target, so when a
+so do the `ACTARI_SYNC_*` variables — they describe one target, so when a
 `targets` list is present they are ignored with a line on stderr rather than
 silently adding a third destination.
 
@@ -170,7 +175,7 @@ sync_scope { "workspace": "acme", "projects": ["acme-web"] }   # bind these to t
 With a single workspace the `workspace` argument may be omitted. With several
 targets (servers), binding also names the target by its alias:
 `sync_scope { "target": "acme", "workspace": "team", "projects": ["acme-web"] }`.
-`WORKHORSE_SYNC_PROJECTS="acme-web,acme-api"` overrides the registry for one
+`ACTARI_SYNC_PROJECTS="acme-web,acme-api"` overrides the registry for one
 process, but only while you have a single workspace — with several it names the
 projects yet not the destination, so it is ignored with a warning. With no
 mapping anywhere: a single workspace receives everything (with a warning, as
@@ -196,20 +201,52 @@ Sync is one-way: the journal is pushed up, the cloud never rewrites it. The
 cursor request is sent with `Cache-Control: no-store`, so a caching proxy in
 front of an on-premise instance cannot serve a stale cursor.
 
-## Skills
+## Policies
 
-The package ships three skills — pick the one that matches your setup:
+The server records; a **policy** decides the rules. A policy is a small JSON
+document:
 
-| Skill | Install it on | What it teaches |
-|---|---|---|
-| `workhorse-ai-orchestrator` | the agent that assigns and accepts work | the full discipline: bootstrap, drafting assignments, line-by-line review, acceptance by your own test run |
-| `workhorse-ai-worker` | the agent that executes delegated tasks | the three journal duties, the report format, and the prohibitions (never accept your own work) |
-| `workhorse-ai-all` | a single agent playing both roles | the solo discipline: the report and the acceptance stay separate acts with separate evidence |
+```json
+{
+  "schemaVersion": 1,
+  "name": "Evidence first",
+  "description": "Accepted means confirmed by something you can check.",
+  "enforce": { "accept_requires_evidence": true, "draft_requires_artifact": null },
+  "guidance": {
+    "draft": "State what must be true when the task is done and how it is proven.",
+    "delegate": "",
+    "report": "Say what was verified and how — commands and output, not a summary.",
+    "accept": "Accept only with evidence you produced or inspected yourself."
+  }
+}
+```
 
-Install via the Claude Code plugin (all three come along), or pick one:
+- `enforce` — the two switches the server checks: `accept` without
+  `evidence` is rejected; `draft_task` is rejected until an artifact with
+  the templated title exists (`{project}` is replaced by the project name).
+- `guidance` — free text per act, embedded into the descriptions of
+  `draft_task`, `delegate`, `submit_report`, `accept`. Keep each under
+  ~1500 characters: it lands in every session's context.
+
+Where it lives: `~/.actari/policy.json`, next to the database.
+`set_policy { policy }` sets the default for local projects,
+`set_policy { project, policy }` overrides one project; `get_policy
+{ project }` shows the effective policy and its source. A project bound to
+a cloud workspace (`sync_scope`) takes the workspace's policy only — it is
+pulled on start and on every `sync`, and edited in the workspace settings.
+Without any policy the server is *lenient*: it records and does not judge.
+
+Built-in presets (`Lenient`, `Evidence first`, `Strict`) are published in
+the cloud as public policies — attach or fork one there, or export its JSON
+and use it locally with `set_policy`.
+
+## Skill
+
+The package ships one skill, `actari` — the journal protocol and the
+pointer to `get_policy`. Install via the Claude Code plugin, or:
 
 ```bash
-npx skills add workhorse-ai/workhorse-ai-mcp --skill workhorse-ai-orchestrator
+npx skills add actari/actari-mcp --skill actari
 ```
 
 ## License

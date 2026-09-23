@@ -26,18 +26,18 @@ const OTHER_WORKSPACE = { id: "ws-other", slug: "other-space", name: "Other" };
 // ============ фикстуры ============
 
 function tmpDir() {
-	return mkdtempSync(join(tmpdir(), "workhorse-inbox-test-"));
+	return mkdtempSync(join(tmpdir(), "actari-inbox-test-"));
 }
 
-// env без унаследованных WORKHORSE_SYNC_* (чтобы окружение машины не влияло)
+// env без унаследованных ACTARI_SYNC_* (чтобы окружение машины не влияло)
 function cleanEnv(extra = {}) {
 	const env = { ...process.env };
 	for (const k of [
-		"WORKHORSE_SYNC_URL",
-		"WORKHORSE_SYNC_TOKEN",
-		"WORKHORSE_SYNC_JOURNAL_ID",
-		"WORKHORSE_SYNC_CONFIG",
-		"WORKHORSE_DB",
+		"ACTARI_SYNC_URL",
+		"ACTARI_SYNC_TOKEN",
+		"ACTARI_SYNC_JOURNAL_ID",
+		"ACTARI_SYNC_CONFIG",
+		"ACTARI_DB",
 	])
 		delete env[k];
 	return { ...env, ...extra };
@@ -202,11 +202,11 @@ function startMcp(t, env) {
 
 function mcpEnv(dir, syncUrl) {
 	return cleanEnv({
-		WORKHORSE_DB: join(dir, "inbox.db"),
-		WORKHORSE_SCHEMA: SCHEMA,
-		WORKHORSE_SYNC_URL: syncUrl,
-		WORKHORSE_SYNC_TOKEN: TOKEN,
-		WORKHORSE_SYNC_JOURNAL_ID: JOURNAL,
+		ACTARI_DB: join(dir, "inbox.db"),
+		ACTARI_SCHEMA: SCHEMA,
+		ACTARI_SYNC_URL: syncUrl,
+		ACTARI_SYNC_TOKEN: TOKEN,
+		ACTARI_SYNC_JOURNAL_ID: JOURNAL,
 	});
 }
 
@@ -245,13 +245,17 @@ test("inbox: список намерений — счётчик и кратки�
 
 	let r = await c.tool("inbox", {});
 	assert.match(r.text, /^2 намерений:/);
-	assert.match(
+	assert.ok(
+		r.text.includes(
+			"- intent-1 Тёмная тема — свободная · без критериев\n  фича: UI-полировка · пространство: alpha-space · проект журнала: не привязан (sync_scope)",
+		),
 		r.text,
-		/- intent-1 — Тёмная тема \(фича: UI-полировка, пространство: alpha-space\)/,
 	);
-	assert.match(
+	assert.ok(
+		r.text.includes(
+			"- intent-2 Инбокс намерений — свободная · без критериев\n  фича: Обратная петля · пространство: other-space · проект журнала: не привязан (sync_scope)",
+		),
 		r.text,
-		/- intent-2 — Инбокс намерений \(фича: Обратная петля, пространство: other-space\)/,
 	);
 	assert.match(r.text, /take/);
 
@@ -317,10 +321,7 @@ test("take: чужое намерение (403 от облака) — отказ
 test("draft_task: intent_task_id уезжает в payload события TaskDrafted (сырое событие)", async (t) => {
 	const dir = tmpDir();
 	// Без конфига синка: авто-пуш — тихий no-op, журнал живёт локально
-	const c = startMcp(
-		t,
-		cleanEnv({ WORKHORSE_DB: join(dir, "local.db"), WORKHORSE_SCHEMA: SCHEMA }),
-	);
+	const c = startMcp(t, cleanEnv({ ACTARI_DB: join(dir, "local.db"), ACTARI_SCHEMA: SCHEMA }));
 	await c.tool("register_project", { name: "demo", root_path: "/tmp/demo" });
 
 	let r = await c.tool("draft_task", {
@@ -334,6 +335,7 @@ test("draft_task: intent_task_id уезжает в payload события TaskDr
 
 	r = await c.tool("get_task", {
 		task_id: `demo/${new Date().toISOString().slice(0, 10)}-with-intent`,
+		full: true,
 	});
 	assert.equal(r.ok, true);
 	const drafted = r.data.events.find((e) => e.type === "TaskDrafted");
@@ -347,7 +349,10 @@ test("draft_task: intent_task_id уезжает в payload события TaskDr
 		task_text: "текст",
 	});
 	assert.equal(r.ok, true);
-	r = await c.tool("get_task", { task_id: `demo/${new Date().toISOString().slice(0, 10)}-plain` });
+	r = await c.tool("get_task", {
+		task_id: `demo/${new Date().toISOString().slice(0, 10)}-plain`,
+		full: true,
+	});
 	const plain = r.data.events.find((e) => e.type === "TaskDrafted");
 	assert.equal("intent_task_id" in JSON.parse(plain.payload), false);
 });
@@ -356,10 +361,7 @@ test("draft_task: intent_task_id уезжает в payload события TaskDr
 
 test("inbox/take: без конфига синка — «инбокс не настроен», сервер жив", async (t) => {
 	const dir = tmpDir();
-	const c = startMcp(
-		t,
-		cleanEnv({ WORKHORSE_DB: join(dir, "plain.db"), WORKHORSE_SCHEMA: SCHEMA }),
-	);
+	const c = startMcp(t, cleanEnv({ ACTARI_DB: join(dir, "plain.db"), ACTARI_SCHEMA: SCHEMA }));
 
 	let r = await c.tool("inbox", {});
 	assert.equal(r.text, "инбокс не настроен (нет sync.json)");

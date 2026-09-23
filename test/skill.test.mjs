@@ -1,33 +1,29 @@
-// Скиллы едут внутри пакета: все три на месте, frontmatter корректен,
-// каталог skills/ входит в files-whitelist (иначе npm его не упакует).
+// Скилл едет внутри пакета: один протокольный, frontmatter корректен,
+// ролевых скиллов нет, каталог skills/ входит в files-whitelist.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 
-// Линейка: оркестратор / исполнитель / соло. Имена симметричны ролям.
-const SKILLS = ["workhorse-ai-orchestrator", "workhorse-ai-worker", "workhorse-ai-all"];
+test("единственный скилл actari: frontmatter, протокол, ссылка на политику", () => {
+	assert.deepEqual(readdirSync(join(ROOT, "skills")), ["actari"]);
+	const path = join(ROOT, "skills", "actari", "SKILL.md");
+	assert.equal(existsSync(path), true);
 
-test("все три скилла лежат в пакете с корректным frontmatter", () => {
-	for (const name of SKILLS) {
-		const path = join(ROOT, "skills", name, "SKILL.md");
-		assert.equal(existsSync(path), true, `skills/${name}/SKILL.md на месте`);
-
-		const text = readFileSync(path, "utf8");
-		const frontmatter = text.match(/^---\n([\s\S]*?)\n---\n/);
-		assert.ok(frontmatter, `${name}: есть frontmatter`);
-		assert.match(frontmatter[1], new RegExp(`^name: ${name}$`, "m"));
-		assert.match(frontmatter[1], /^description: .+/m);
-		assert.ok(text.includes("REPORTED"), `${name}: инвариант REPORTED описан`);
+	const text = readFileSync(path, "utf8");
+	const frontmatter = text.match(/^---\n([\s\S]*?)\n---\n/);
+	assert.ok(frontmatter, "есть frontmatter");
+	assert.match(frontmatter[1], /^name: actari$/m);
+	assert.match(frontmatter[1], /^description: .+/m);
+	assert.ok(text.includes("REPORTED"), "семантика статусов описана");
+	assert.ok(text.includes("get_policy"), "правила — в политике");
+	for (const banned of ["orchestrator's own test run", "never accept your own"]) {
+		assert.ok(!text.includes(banned), `методологии в протокольном скилле нет: ${banned}`);
 	}
-
-	// Исполнителю приёмка запрещена явно — это стержень инварианта.
-	const worker = readFileSync(join(ROOT, "skills", "workhorse-ai-worker", "SKILL.md"), "utf8");
-	assert.match(worker, /not.*call.*`accept`/i);
 
 	const pkg = JSON.parse(readFileSync(join(ROOT, "package.json"), "utf8"));
 	assert.ok(
