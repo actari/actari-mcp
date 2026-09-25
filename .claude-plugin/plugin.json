@@ -1,6 +1,6 @@
 {
 	"name": "actari",
-	"version": "0.13.0",
+	"version": "0.16.0",
 	"description": "A task journal for AI agents (MCP over SQLite, event sourcing) plus the protocol skill. Statuses: REPORTED (the executor believes it is done) ≠ ACCEPTED (confirmed by a check). The rules of drafting, reporting and accepting come from a per-project policy, not from the package.",
 	"author": {
 		"name": "Aleksey Nikitin",

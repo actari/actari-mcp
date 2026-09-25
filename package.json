@@ -1,6 +1,6 @@
 {
   "name": "actari-mcp",
-  "version": "0.13.0",
+  "version": "0.16.0",
   "private": false,
   "type": "module",
   "description": "Task journal for AI agents: event sourcing over SQLite with an MCP interface. Policies set the rules. Zero dependencies.",
@@ -25,6 +25,7 @@
   },
   "files": [
     "server.mjs",
+    "tool-args.mjs",
     "sync.mjs",
     "policy.mjs",
     "intent.mjs",

@@ -11,6 +11,7 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { readEnv } from "./env.mjs";
+import { checkToolArguments, formatToolArgumentsError, formatUnknownHint } from "./tool-args.mjs";
 import {
 	defaultJournalId,
 	fetchCursor,
@@ -55,11 +56,14 @@ import {
 	formatIntentStatus,
 	formatNotices,
 	formatReleaseRejection,
+	formatPublishRejection,
+	formatPublishResult,
 	formatSyncWarning,
 	formatTakeContext,
 	formatTakeRejection,
 	formatWhen,
 	parseJournalAt,
+	postIntentPublish,
 	postIntentRelease,
 	readIntentCache,
 	readIntentMeta,
@@ -99,6 +103,17 @@ function tasksHaveEvidenceColumn(database) {
 		.prepare("PRAGMA table_info(tasks)")
 		.all()
 		.some((col) => col.name === "evidence");
+}
+
+// CHECK типов событий не меняется ALTER'ом — старую схему узнаём по тексту DDL.
+// Новый тип события — новая строка в этом списке, иначе IF NOT EXISTS оставит старый CHECK.
+const REQUIRED_EVENT_TYPES = ["Dropped", "Released"];
+function eventsAcceptAllTypes(database) {
+	const row = database
+		.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='events'")
+		.get();
+	const sql = row?.sql ?? "";
+	return REQUIRED_EVENT_TYPES.every((type) => sql.includes(`'${type}'`));
 }
 
 // payload события старой схемы → новой: Accepted нёс verify_commit
@@ -150,7 +165,7 @@ const hasEvents = db
 	.get();
 if (!hasEvents) {
 	db.exec(requireSchemaFile());
-} else if (!tasksHaveEvidenceColumn(db)) {
+} else if (!tasksHaveEvidenceColumn(db) || !eventsAcceptAllTypes(db)) {
 	db = replayJournal(DB_PATH, db);
 }
 
@@ -164,7 +179,17 @@ const VALID_FROM = {
 	Accepted: ["REPORTED"],
 	ReworkRequested: ["REPORTED"],
 	Failed: ["DELEGATED", "REPORTED", "REWORK"],
+	Dropped: ["DRAFT"],
 };
+
+// Подсказка выхода к отказу перехода — должна быть исполнимой из текущего статуса
+function transitionHint(type, status) {
+	if (type !== "Dropped") return "";
+	if (["DELEGATED", "REPORTED", "REWORK"].includes(status)) {
+		return " — задача уже в работе, закрывай её mark_failed";
+	}
+	return " — задача уже закрыта";
+}
 
 const getTaskStmt = db.prepare("SELECT * FROM tasks WHERE task_id = ?");
 const insertEventStmt = db.prepare("INSERT INTO events(task_id, type, payload) VALUES (?, ?, ?)");
@@ -219,7 +244,7 @@ function assertTransition(taskId, type) {
 	if (!task) throw new Error(`Задача ${taskId} не найдена`);
 	if (!guard.includes(task.status)) {
 		throw new Error(
-			`${type} недопустим из статуса ${task.status} (допустимо из: ${guard.join(", ")})`,
+			`${type} недопустим из статуса ${task.status} (допустимо из: ${guard.join(", ")})${transitionHint(type, task.status)}`,
 		);
 	}
 	return task;
@@ -909,6 +934,24 @@ const TOOLS = [
 		handler: ({ task_id, reason }) => emit(task_id, "Failed", { reason }),
 	},
 	{
+		name: "drop_task",
+		description:
+			"Отказаться от черновика (событие Dropped), только из DRAFT. Задача остаётся в истории и находится search_precedents; вернуть нельзя — передумали, заведи новую задачу и свяжи relates.",
+		inputSchema: {
+			type: "object",
+			properties: {
+				task_id: { type: "string" },
+				reason: { type: "string", description: "Почему отказываемся (обязательно)" },
+			},
+			required: ["task_id", "reason"],
+		},
+		handler: ({ task_id, reason }) => {
+			const text = String(reason ?? "").trim();
+			if (!text) throw new Error("drop_task: нужна причина отказа (reason)");
+			return emit(task_id, "Dropped", { reason: text });
+		},
+	},
+	{
 		name: "record_incident",
 		description:
 			"Записать грабли/урок (событие IncidentRecorded). Для инцидентов вне конкретной задачи " +
@@ -925,6 +968,46 @@ const TOOLS = [
 		handler: ({ description, lesson, task_id = "_general" }) => {
 			appendEvent(task_id, "IncidentRecorded", JSON.stringify({ description, lesson }));
 			return { recorded: true, task_id, description, lesson };
+		},
+	},
+	{
+		name: "record_release",
+		description:
+			"Записать выпуск (событие Released): что уехало на прод в проекте. Пишет любой процесс выкатки после того, как изменения на проде. items — свободные строки (slug фич или что угодно), журнал их с задачами не сверяет; ref — коммит или тег выкатки. После sync облако рассылает уведомление о выпуске.",
+		inputSchema: {
+			type: "object",
+			properties: {
+				project: { type: "string", description: "Зарегистрированный проект журнала" },
+				items: {
+					type: "array",
+					items: { type: "string" },
+					description: "Что выкачено: slug фич или свободные строки",
+				},
+				ref: { type: "string", description: "Коммит или тег выкатки" },
+				summary: { type: "string", description: "Короткое пояснение (необязательно)" },
+			},
+			required: ["project", "items"],
+		},
+		handler: ({ project, items, ref, summary }) => {
+			const list = [
+				...new Set(
+					(Array.isArray(items) ? items : [])
+						.map((item) => String(item ?? "").trim())
+						.filter(Boolean),
+				),
+			];
+			if (list.length === 0)
+				throw new Error("record_release: нужен хотя бы один пункт выпуска (items)");
+			const payload = { project, items: list };
+			const refText = String(ref ?? "").trim();
+			const summaryText = String(summary ?? "").trim();
+			if (refText) payload.ref = refText;
+			if (summaryText) payload.summary = summaryText;
+			appendEvent("_general", "Released", JSON.stringify(payload));
+			const { seq } = db
+				.prepare("SELECT seq FROM events WHERE type = 'Released' ORDER BY seq DESC LIMIT 1")
+				.get();
+			return { recorded: true, seq, task_id: "_general", ...payload };
 		},
 	},
 	{
@@ -1629,6 +1712,99 @@ const TOOLS = [
 		},
 	},
 	{
+		name: "publish_intent",
+		description:
+			"Опубликовать бриф в облако: создаёт или обновляет фичу (текст — бриф) и её намерение (критерии) " +
+			"по ключу (project, slug) в пространстве проекта. Повтор обновляет, дублей нет; карточку, закрытую " +
+			"вручную, не пересоздаёт. intent_task_id — привязать бриф к намерению из inbox вместо создания. " +
+			"Отказ не мешает локальному флоу. Дальше: /feature → take <id намерения>.",
+		inputSchema: {
+			type: "object",
+			properties: {
+				project: { type: "string", description: "Проект журнала (с cloud_workspace_id)" },
+				slug: {
+					type: "string",
+					description: "Slug брифа/фичи — ключ идемпотентности вместе с project",
+				},
+				title: { type: "string", description: "Заголовок фичи" },
+				text: { type: "string", description: "Бриф целиком → описание фичи" },
+				acceptance_criteria: { type: "string", description: "Критерии готовности из брифа" },
+				intent_task_id: {
+					type: "string",
+					description: "Id намерения из inbox — привязать, не создавать",
+				},
+			},
+			required: ["project", "slug", "title", "text", "acceptance_criteria"],
+		},
+		handler: async ({ project, slug, title, text, acceptance_criteria, intent_task_id }) => {
+			const row = requireProject(project);
+			if (!row.cloud_workspace_id) {
+				throw new Error(
+					`проект ${project} не привязан к облаку (register_project с cloud_workspace_id или sync_scope) — локальный флоу продолжается`,
+				);
+			}
+			const targets = orderedTargets(
+				intent_task_id ? readIntentCache(db, intent_task_id)?.target_url : null,
+			);
+			if (targets.length === 0) {
+				throw new Error(
+					"облако не настроено (нет sync.json / token) — локальный флоу продолжается",
+				);
+			}
+			const body = {
+				workspaceId: row.cloud_workspace_id,
+				project,
+				slug,
+				title,
+				text,
+				acceptanceCriteria: acceptance_criteria,
+				intentTaskId: intent_task_id ?? null,
+			};
+			const errors = [];
+			let missing = false;
+			for (const target of targets) {
+				const result = await postIntentPublish({ target, body, timeoutMs: INBOX_TIMEOUT });
+				if (result.kind === "ok") {
+					// Автор критериев — сам агент: они увидены, accept по ним не споткнётся.
+					if (result.body.intent?.id) {
+						writeIntentView(db, {
+							targetUrl: target.url,
+							view: result.body.intent,
+							markSeen: true,
+						});
+					}
+					return formatPublishResult(result.body);
+				}
+				if (result.kind === "forbidden") continue;
+				if (result.kind === "not_found") {
+					missing = true;
+					continue;
+				}
+				if (result.kind === "rejected")
+					throw new Error(formatPublishRejection({ project, slug }, result.body));
+				// Не markIntentsUnsupported: старое облако без POST /intents может уметь GET /intents/[id].
+				if (result.kind === "unsupported")
+					throw new Error("облако не поддерживает publish_intent (старая версия сервера)");
+				if (result.kind === "invalid") {
+					const first = result.issues[0];
+					throw new Error(
+						`облако отклонило publish_intent: ${first ? `${(first.path ?? []).join(".")}: ${first.message}` : "неверный запрос"}`,
+					);
+				}
+				errors.push(result.error);
+			}
+			if (errors.length > 0) {
+				throw new Error(
+					`облако недоступно: ${errors.join("; ")}; повторите publish_intent позже — бриф локально записан`,
+				);
+			}
+			if (missing) throw new Error(`намерение ${intent_task_id} не найдено в облаке`);
+			throw new Error(
+				`нет доступа к пространству ${row.cloud_workspace_id} ни в одной цели синка (403)`,
+			);
+		},
+	},
+	{
 		name: "get_policy",
 		description:
 			"Эффективная политика проекта: правила постановки, отчёта и приёмки (enforce + guidance " +
@@ -1726,7 +1902,7 @@ const TOOLS = [
 			properties: {
 				status: {
 					type: "string",
-					description: "DRAFT | DELEGATED | REPORTED | ACCEPTED | REWORK | FAILED",
+					description: "DRAFT | DELEGATED | REPORTED | ACCEPTED | REWORK | FAILED | DROPPED",
 				},
 				project: { type: "string" },
 				limit: { type: "number", description: "default 20" },
@@ -1757,13 +1933,14 @@ const TOOLS = [
 // ============ инструкция сервера и промпты (слеш-команды) ============
 
 const PROTOCOL_INSTRUCTIONS = `Журнал задач для AI-агентов (event sourcing поверх SQLite).
-Статусы: DRAFT → DELEGATED → REPORTED → ACCEPTED | REWORK (→ DELEGATED…) | FAILED.
+Статусы: DRAFT → DELEGATED → REPORTED → ACCEPTED | REWORK (→ DELEGATED…) | FAILED; черновик можно закрыть отказом: DRAFT → DROPPED (drop_task, с причиной).
 Семантика: REPORTED — заявка исполнителя «считаю, что готово»; ACCEPTED — подтверждено проверкой. Это разные факты: заявленное не выдаётся за сделанное.
 Проекты регистрируются в реестре (register_project: имя-неймспейс + root_path + маппинг на пространство в облаке); задачи и артефакты принимаются только для зарегистрированных.
 Артефакты (spec/plan/adr/decision/note/doc) версионируются: повторная запись с тем же title = новая версия.
 Продолжение закрытой задачи — новая задача + link_tasks kind=continues; найденная по ходу работа — новая задача + discovered_from. Rework-цикл живёт только внутри незакрытой задачи.
 Статусы меняются только через события журнала (инструменты), не через базу.
-Намерения облака: inbox → take → draft_task с intent_task_id. Человек может отменить, закрыть или забрать намерение и поменять критерии — сервер откажет в акте и скажет почему; intent_status показывает состояние, release_intent отпускает взятое.`;
+Намерения облака: inbox → take → draft_task с intent_task_id. Человек может отменить, закрыть или забрать намерение и поменять критерии — сервер откажет в акте и скажет почему; intent_status показывает состояние, release_intent отпускает взятое. Фича из локального флоу: publish_intent { project, slug, title, text, acceptance_criteria } создаёт или обновляет в облаке фичу с намерением (ключ project+slug), дальше take.
+Выпуск на прод — record_release (событие Released, не привязано к задаче); после sync облако рассылает уведомление.`;
 
 // Инструкции собираются на каждом initialize: политика и предупреждения — по
 // текущему состоянию файла и базы, а не по снимку старта.
@@ -1815,7 +1992,7 @@ const PROMPTS = [
 
 Фильтр: "${filter}"
 
-Разбор фильтра: пусто — list_tasks (последние 20); статус (DRAFT/DELEGATED/REPORTED/ACCEPTED/REWORK/FAILED, регистр не важен) — list_tasks по статусу; имя проекта — list_tasks по проекту (комбинируются); "incidents" — search_precedents/база: последние грабли (description + lesson); значение с "/" — get_task: карточка + история событий; иные слова — search_precedents.
+Разбор фильтра: пусто — list_tasks (последние 20); статус (DRAFT/DELEGATED/REPORTED/ACCEPTED/REWORK/FAILED/DROPPED, регистр не важен) — list_tasks по статусу; имя проекта — list_tasks по проекту (комбинируются); "incidents" — search_precedents/база: последние грабли (description + lesson); значение с "/" — get_task: карточка + история событий; иные слова — search_precedents.
 
 Вывод: компактная таблица task_id | статус | исполнитель | outcome | обновлено (для карточки — поля + хронология). Пусто — так и сказать, без лишнего текста.`,
 	},
@@ -1968,20 +2145,40 @@ function handle(msg) {
 		} else if (method === "tools/call") {
 			const tool = TOOLS.find((t) => t.name === params?.name);
 			if (!tool) throw new Error(`Неизвестный инструмент: ${params?.name}`);
-			// Promise.resolve поддерживает и синхронные, и async-хендлеры (sync).
-			// Строковый результат — готовый текст ответа, объект — JSON.
-			Promise.resolve()
-				.then(() => tool.handler(params?.arguments ?? {}))
-				.then((result) => {
-					const text = typeof result === "string" ? result : JSON.stringify(result, null, 2);
-					respond(id, { content: contentWithNotices(text) });
-				})
-				.catch((err) => {
-					respond(id, {
-						content: contentWithNotices(`Ошибка: ${err.message}`),
-						isError: true,
-					});
+			const args = params?.arguments ?? {};
+			// Проверка required/type по inputSchema ДО handler: невалидный вызов
+			// не должен породить событие (инцидент 2026-09-01: report_text вместо
+			// report записал ReportSubmitted с пустым payload — отчёт потерян).
+			const check = checkToolArguments(tool.inputSchema, args);
+			if (check.missing.length || check.wrongType.length) {
+				respond(id, {
+					content: contentWithNotices(
+						`Ошибка: ${formatToolArgumentsError(tool.name, tool.inputSchema, check)}`,
+					),
+					isError: true,
 				});
+			} else {
+				// Promise.resolve поддерживает и синхронные, и async-хендлеры (sync).
+				// Строковый результат — готовый текст ответа, объект — JSON.
+				Promise.resolve()
+					.then(() => tool.handler(args))
+					.then((result) => {
+						const text = typeof result === "string" ? result : JSON.stringify(result, null, 2);
+						const content = contentWithNotices(text);
+						if (check.unknown.length)
+							content.push({
+								type: "text",
+								text: formatUnknownHint(tool.inputSchema, check.unknown),
+							});
+						respond(id, { content });
+					})
+					.catch((err) => {
+						respond(id, {
+							content: contentWithNotices(`Ошибка: ${err.message}`),
+							isError: true,
+						});
+					});
+			}
 		} else {
 			respondError(id, `Unsupported method: ${method}`, -32601);
 		}

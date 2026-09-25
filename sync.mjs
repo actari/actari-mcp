@@ -5,7 +5,7 @@
 // значением ({error}), исключения наружу не летят — пушер никогда не роняет журнал.
 
 import { DatabaseSync } from "node:sqlite";
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir, hostname, userInfo } from "node:os";
 import { join, dirname } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -37,14 +37,19 @@ export function resolveDbPath({ env = process.env, homedir: home = homedir() } =
 // targets игнорируются со строкой в лог — перекрыть список одной парой
 // url/token нечем, а молча слать журнал ещё и в env-цель нельзя.
 // Нет ни файла, ни env → синк выключен (пустой список) — это норма.
-export function syncConfigPath({ dbPath, env = process.env } = {}) {
-	const resolvedDbPath = dbPath ?? resolveDbPath({ env });
+export function syncConfigPath({ dbPath, env = process.env, homedir: home } = {}) {
+	const resolvedDbPath = dbPath ?? resolveDbPath({ env, homedir: home });
 	return readEnv("SYNC_CONFIG", { env }) ?? join(dirname(resolvedDbPath), "sync.json");
 }
 
 // Сырой конфиг из файла: объект либо null (файла нет / не парсится / не объект).
-export function readSyncConfigFile({ dbPath, env = process.env, log = console.error } = {}) {
-	const configPath = syncConfigPath({ dbPath, env });
+export function readSyncConfigFile({
+	dbPath,
+	env = process.env,
+	log = console.error,
+	homedir: home,
+} = {}) {
+	const configPath = syncConfigPath({ dbPath, env, homedir: home });
 	if (!existsSync(configPath)) return null;
 	try {
 		const parsed = JSON.parse(readFileSync(configPath, "utf8"));
@@ -99,8 +104,13 @@ function finalizeTargets(rawTargets) {
 }
 
 // Все цели синка: [] = синк выключен.
-export function loadSyncTargets({ dbPath, env = process.env, log = console.error } = {}) {
-	const fileConfig = readSyncConfigFile({ dbPath, env, log }) ?? {};
+export function loadSyncTargets({
+	dbPath,
+	env = process.env,
+	log = console.error,
+	homedir: home,
+} = {}) {
+	const fileConfig = readSyncConfigFile({ dbPath, env, log, homedir: home }) ?? {};
 	const listed = Array.isArray(fileConfig.targets)
 		? fileConfig.targets.filter((t) => t && typeof t === "object" && !Array.isArray(t))
 		: null;
@@ -130,8 +140,13 @@ export function loadSyncTargets({ dbPath, env = process.env, log = console.error
 
 // Одна цель как раньше ({url, token, journalId} либо null) — для инбокса
 // намерений (pull всегда из одного облака) и для совместимости вызовов.
-export function loadSyncConfig({ dbPath, env = process.env, log = console.error } = {}) {
-	const [first] = loadSyncTargets({ dbPath, env, log });
+export function loadSyncConfig({
+	dbPath,
+	env = process.env,
+	log = console.error,
+	homedir: home,
+} = {}) {
+	const [first] = loadSyncTargets({ dbPath, env, log, homedir: home });
 	if (!first) return null;
 	return { url: first.url, token: first.token, journalId: first.journalId };
 }
@@ -140,8 +155,11 @@ export function loadSyncConfig({ dbPath, env = process.env, log = console.error 
 // (ACTARI_SYNC_CONFIG ?? sync.json рядом с базой). Перезапись существующего
 // файла — осознанное действие пользователя (connect).
 // Возвращает путь записанного файла.
-export function writeSyncConfig({ dbPath, env = process.env, config }) {
-	const configPath = syncConfigPath({ dbPath, env });
+export function writeSyncConfig({ dbPath, env = process.env, config, homedir: home }) {
+	const configPath = syncConfigPath({ dbPath, env, homedir: home });
+	// Каталог рядом с базой обычно уже существует (её создал сервер), но под
+	// переданным homedir (тесты, ещё не тронутый профиль) его может не быть.
+	mkdirSync(dirname(configPath), { recursive: true });
 	writeFileSync(configPath, `${JSON.stringify(config, null, "\t")}\n`);
 	return configPath;
 }
@@ -234,8 +252,8 @@ export function inboxUrlFromSyncUrl(input) {
 // единственной цели — апгрейд ничего не теряет и не вызывает пересинк.
 export const SYNC_STATE_FILE = "sync-state.json";
 
-export function syncStatePath({ dbPath, env = process.env } = {}) {
-	return join(dirname(dbPath ?? resolveDbPath({ env })), SYNC_STATE_FILE);
+export function syncStatePath({ dbPath, env = process.env, homedir: home } = {}) {
+	return join(dirname(dbPath ?? resolveDbPath({ env, homedir: home })), SYNC_STATE_FILE);
 }
 
 // Ключ состояния цели: id пространства — он переживает переезд инстанса на
@@ -273,8 +291,8 @@ function stateTargetsMap(parsed) {
 // старой версией (она слала всё) либо не работал вовсе; в обоих случаях «всё» —
 // честный ответ. Без key возвращается состояние единственной цели (если она
 // одна) — так читают состояние и старые вызовы, и тесты.
-export function readSyncState({ dbPath, env = process.env, key = null } = {}) {
-	const parsed = parseSyncStateFile(syncStatePath({ dbPath, env }));
+export function readSyncState({ dbPath, env = process.env, key = null, homedir: home } = {}) {
+	const parsed = parseSyncStateFile(syncStatePath({ dbPath, env, homedir: home }));
 	if (!parsed) return { projects: null };
 	const flat = Array.isArray(parsed.projects) ? parsed.projects : null;
 	const targets = stateTargetsMap(parsed);
@@ -292,8 +310,8 @@ export function readSyncState({ dbPath, env = process.env, key = null } = {}) {
 
 // Запись области цели. Плоское состояние старых версий при первой записи
 // переезжает в карту целей под ключом записываемой цели.
-export function writeSyncState({ dbPath, env = process.env, projects, key = null }) {
-	const path = syncStatePath({ dbPath, env });
+export function writeSyncState({ dbPath, env = process.env, projects, key = null, homedir: home }) {
+	const path = syncStatePath({ dbPath, env, homedir: home });
 	const at = new Date().toISOString();
 	if (key === null) {
 		writeFileSync(path, `${JSON.stringify({ projects: projects ?? null, at }, null, "\t")}\n`);

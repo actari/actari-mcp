@@ -150,7 +150,7 @@ function reopenedAfterAttempt({ view, seenReopenedAt, localCreatedAt }) {
 
 function gateExitHint(localStatus, { draftContinuation, markFailedReason }) {
 	if (localStatus === "DRAFT") {
-		return `Не делегируй эту задачу: черновик остаётся в журнале как история. ${draftContinuation}`;
+		return `Не делегируй эту задачу: черновик остаётся в журнале как история. ${draftContinuation} Или закрой черновик drop_task с причиной.`;
 	}
 	return `Закрой попытку: mark_failed { task_id, reason: "${markFailedReason}" }.`;
 }
@@ -421,6 +421,10 @@ export function intentChangesUrlFromBase(base, since) {
 	return url.toString();
 }
 
+export function intentsUrlFromBase(base) {
+	return `${normalizeBaseUrl(base)}${INTENTS_PATH}`;
+}
+
 // ============ клиент API намерений ============
 
 function authHeaders(target, extra = {}) {
@@ -502,6 +506,48 @@ export async function postIntentRelease({
 	if (res.status === 404) return notFoundKind(body);
 	if (res.status === 403) return { kind: "forbidden" };
 	return { kind: "unavailable", error: `HTTP ${res.status}` };
+}
+
+// publish_intent (спека 2026-09-25 §3–4): 404 с телом роута — нет намерения
+// intentTaskId; любой другой 404 — старое облако без маршрута.
+export async function postIntentPublish({ target, body, timeoutMs = INTENT_TIMEOUT_MS }) {
+	let res;
+	try {
+		res = await fetch(intentsUrlFromBase(target.url), {
+			method: "POST",
+			headers: authHeaders(target, { "content-type": "application/json" }),
+			body: JSON.stringify(body),
+			signal: AbortSignal.timeout(timeoutMs),
+		});
+	} catch (err) {
+		return { kind: "unavailable", error: networkError(err) };
+	}
+	const payload = await readJson(res);
+	if (res.ok && typeof payload?.intentId === "string") return { kind: "ok", body: payload };
+	if (res.status === 409) return { kind: "rejected", body: payload };
+	if (res.status === 404) return notFoundKind(payload);
+	if (res.status === 403) return { kind: "forbidden" };
+	if (res.status === 400)
+		return { kind: "invalid", issues: Array.isArray(payload?.issues) ? payload.issues : [] };
+	return { kind: "unavailable", error: `HTTP ${res.status}` };
+}
+
+export function formatPublishResult(body) {
+	return `намерение ${body.intentId} (${body.outcome}), фича ${body.featureId}, критерии v${body.criteriaVersion}\nдальше: /feature → take ${body.intentId}`;
+}
+
+export function formatPublishRejection({ project, slug }, body) {
+	const intent = body?.intent?.id
+		? `${body.intent.id}${body.intent.title ? ` («${body.intent.title}»)` : ""}`
+		: "?";
+	switch (body?.reason) {
+		case "key_taken":
+			return `ключ ${project}/${slug} уже занят другим намерением ${intent} — привязка не сделана`;
+		case "closed_manually":
+			return `карточку ${intent} закрыли вручную в облаке — новую не создаю`;
+		default:
+			return `облако отказало: ${body?.reason ?? "без причины"}`;
+	}
 }
 
 // ============ кэш намерений ============

@@ -172,6 +172,154 @@ test("перенос: база с verify_commit переигрывается в 
 	fresh.close();
 });
 
+test("перенос: старая схема без Dropped в CHECK переигрывается", async (t) => {
+	const dir = tmpDir();
+	const dbPath = join(dir, "journal.db");
+
+	// 1) База по схеме без 'Dropped' в CHECK — имитация версии до этой фичи.
+	const legacySchema = readFileSync(SCHEMA, "utf8").replace(
+		"                'Dropped',          -- payload: reason\n",
+		"",
+	);
+	assert.ok(
+		!legacySchema.includes("'Dropped',          -- payload: reason"),
+		"строка Dropped вырезана из CHECK",
+	);
+	const legacy = new DatabaseSync(dbPath);
+	legacy.exec(legacySchema);
+	// Проект — событием ProjectRegistered (не напрямую в проекцию): переигрывание
+	// строит фрешовую базу только из events, прямая вставка в projects не
+	// переживёт replay и обвалит guard_project_registered на TaskDrafted.
+	const insertEvent = legacy.prepare("INSERT INTO events(task_id, type, payload) VALUES (?, ?, ?)");
+	insertEvent.run(
+		"_general",
+		"ProjectRegistered",
+		JSON.stringify({ name: "old", root_path: "/tmp/old" }),
+	);
+	insertEvent.run(
+		"old/t1",
+		"TaskDrafted",
+		JSON.stringify({ project: "old", title: "т1", task_text: "x" }),
+	);
+	insertEvent.run(
+		"old/t2",
+		"TaskDrafted",
+		JSON.stringify({ project: "old", title: "т2", task_text: "y" }),
+	);
+	insertEvent.run(
+		"_general",
+		"ArtifactRecorded",
+		JSON.stringify({ project: "old", kind: "note", title: "заметка", body: "текст" }),
+	);
+	const before = {
+		events: legacy.prepare("SELECT count(*) AS n FROM events").get().n,
+		tasks: legacy.prepare("SELECT count(*) AS n FROM tasks").get().n,
+	};
+	legacy.close();
+
+	// 2) Новый старт — детектор по тексту DDL events замечает отсутствие Dropped
+	const c = startClient(t, { dbPath });
+	const list = await c.tool("list_tasks", { project: "old" });
+	assert.ok(list.ok, list.error);
+	assert.equal(list.data.length, before.tasks);
+
+	assert.match(c.getStderr(), new RegExp(`перенесено ${before.events} событий`));
+	const backups = readdirSync(dir).filter((f) => f.startsWith("journal.db.") && f.endsWith(".bak"));
+	assert.equal(backups.length, 1, "бэкап лежит рядом");
+
+	const drop = await c.tool("drop_task", { task_id: "old/t2", reason: "устарело" });
+	assert.ok(drop.ok, drop.error);
+	assert.equal(drop.data.status, "DROPPED");
+
+	await c.stop();
+	const after = (() => {
+		const fresh = new DatabaseSync(dbPath, { readOnly: true });
+		try {
+			return {
+				events: fresh.prepare("SELECT count(*) AS n FROM events").get().n,
+				tasks: fresh.prepare("SELECT count(*) AS n FROM tasks").get().n,
+			};
+		} finally {
+			fresh.close();
+		}
+	})();
+	// после переноса добавилось ровно одно событие Dropped
+	assert.equal(after.events, before.events + 1);
+	assert.equal(after.tasks, before.tasks);
+
+	// 3) Второй запуск на уже новой схеме — без повторного переноса
+	const c2 = startClient(t, { dbPath });
+	await c2.tool("list_tasks", {});
+	assert.doesNotMatch(c2.getStderr(), /перенесено/);
+	assert.equal(
+		readdirSync(dir).filter((f) => f.endsWith(".bak")).length,
+		1,
+		"новый .bak не появился",
+	);
+	await c2.stop();
+});
+
+test("перенос: старая схема без Released в CHECK переигрывается", async (t) => {
+	const dir = tmpDir();
+	const dbPath = join(dir, "journal.db");
+
+	// 1) База по схеме без 'Released' в CHECK — имитация версии до этой фичи.
+	const legacySchema = readFileSync(SCHEMA, "utf8").replace(
+		"                'ProjectRegistered', -- payload: name, root_path, cloud_workspace_id\n                'Released'          -- payload: project, items, ref?, summary?\n",
+		"                'ProjectRegistered' -- payload: name, root_path, cloud_workspace_id\n",
+	);
+	assert.ok(
+		!legacySchema.includes("'Released'          -- payload: project, items, ref?, summary?"),
+		"строка Released вырезана из CHECK",
+	);
+	const legacy = new DatabaseSync(dbPath);
+	legacy.exec(legacySchema);
+	const insertEvent = legacy.prepare("INSERT INTO events(task_id, type, payload) VALUES (?, ?, ?)");
+	insertEvent.run(
+		"_general",
+		"ProjectRegistered",
+		JSON.stringify({ name: "old", root_path: "/tmp/old" }),
+	);
+	insertEvent.run(
+		"old/t1",
+		"TaskDrafted",
+		JSON.stringify({ project: "old", title: "т1", task_text: "x" }),
+	);
+	const before = {
+		events: legacy.prepare("SELECT count(*) AS n FROM events").get().n,
+		tasks: legacy.prepare("SELECT count(*) AS n FROM tasks").get().n,
+	};
+	legacy.close();
+
+	// 2) Новый старт — детектор по тексту DDL events замечает отсутствие Released
+	const c = startClient(t, { dbPath });
+	const list = await c.tool("list_tasks", { project: "old" });
+	assert.ok(list.ok, list.error);
+	assert.equal(list.data.length, before.tasks);
+
+	assert.match(c.getStderr(), new RegExp(`перенесено ${before.events} событий`));
+	const backups = readdirSync(dir).filter((f) => f.startsWith("journal.db.") && f.endsWith(".bak"));
+	assert.equal(backups.length, 1, "бэкап лежит рядом");
+
+	// после переноса CHECK принимает Released, и запись проходит
+	const release = await c.tool("record_release", { project: "old", items: ["a"] });
+	assert.ok(release.ok, release.error);
+
+	await c.stop();
+	const after = (() => {
+		const fresh = new DatabaseSync(dbPath, { readOnly: true });
+		try {
+			return {
+				events: fresh.prepare("SELECT count(*) AS n FROM events").get().n,
+			};
+		} finally {
+			fresh.close();
+		}
+	})();
+	// после переноса добавилось ровно одно событие Released
+	assert.equal(after.events, before.events + 1);
+});
+
 test("перенос: база новой схемы не трогается", async (t) => {
 	const dir = tmpDir();
 	const dbPath = join(dir, "journal.db");

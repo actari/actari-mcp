@@ -20,6 +20,7 @@ The server needs Node.js >= 22.5 and keeps its data in `~/.actari/`.
 
 ```
 DRAFT → DELEGATED → REPORTED → ACCEPTED | REWORK (→ DELEGATED …) | FAILED
+DRAFT → DROPPED (drop_task, with a reason — closes a draft you don't want)
 ```
 
 `REPORTED` means *the executor believes it is done*. `ACCEPTED` means
@@ -47,11 +48,12 @@ that is the **project's policy**, data the server reads from `policy.json`
 | Group | Tools |
 |---|---|
 | Registry | `resolve_project`, `register_project`, `list_projects` |
-| Task lifecycle | `draft_task`, `delegate`, `submit_report`, `accept`, `request_rework`, `mark_failed` |
+| Task lifecycle | `draft_task`, `delegate`, `submit_report`, `accept`, `request_rework`, `mark_failed`, `drop_task` |
 | Knowledge | `search_precedents`, `record_artifact`, `get_artifact`, `list_artifacts`, `record_incident` |
+| Release | `record_release` (not tied to a task — records what shipped to prod) |
 | Overview | `get_task`, `list_tasks`, `link_tasks` |
 | Policy | `get_policy`, `set_policy` |
-| Cloud (optional) | `connect`, `sync_scope`, `sync`, `inbox`, `take`, `intent_status`, `release_intent` |
+| Cloud (optional) | `connect`, `sync_scope`, `sync`, `inbox`, `take`, `intent_status`, `release_intent`, `publish_intent` |
 
 Prompts: `tasks` (show the journal), `bootstrap` (create the artifact the
 policy requires before drafting, if any).
@@ -78,4 +80,4 @@ policy requires before drafting, if any).
 write is then pushed upstream. `sync_scope` binds projects to workspaces.
 `sync` forces a push and refreshes the cached workspace policies. `inbox` /
 `take` pull task intents from the cloud. The cloud never rewrites the
-journal. A human can cancel, close or take back an intent and change its acceptance criteria; the server then refuses the next act and says why. `intent_status` shows the intent; `release_intent` gives a taken intent back.
+journal. A human can cancel, close or take back an intent and change its acceptance criteria; the server then refuses the next act and says why. `intent_status` shows the intent; `release_intent` gives a taken intent back. `publish_intent` publishes a brief to the cloud: it creates or updates a feature and its intent keyed by `(project, slug)`; a card closed by a human is never recreated.

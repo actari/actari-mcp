@@ -8,7 +8,7 @@
 	"plugins": [
 		{
 			"name": "actari",
-			"version": "0.13.0",
+			"version": "0.16.0",
 			"description": "Task journal (MCP over SQLite) plus the protocol skill. Rules come from a per-project policy: local policy.json or the cloud workspace.",
 			"source": "./",
 			"author": {

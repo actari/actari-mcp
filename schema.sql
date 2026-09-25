@@ -16,10 +16,12 @@ CREATE TABLE IF NOT EXISTS events (
                 'Accepted',         -- payload: outcome, evidence
                 'ReworkRequested',  -- payload: reason
                 'Failed',           -- payload: reason
+                'Dropped',          -- payload: reason
                 'IncidentRecorded', -- payload: description, lesson
                 'ArtifactRecorded', -- payload: project, kind, title, body
                 'TaskLinked',       -- payload: to_task_id, kind
-                'ProjectRegistered' -- payload: name, root_path, cloud_workspace_id
+                'ProjectRegistered', -- payload: name, root_path, cloud_workspace_id
+                'Released'          -- payload: project, items, ref?, summary?
             )),
     payload TEXT NOT NULL DEFAULT '{}',
     at      TEXT NOT NULL DEFAULT (datetime('now'))
@@ -42,7 +44,7 @@ WHEN NOT json_valid(NEW.payload)
 BEGIN SELECT RAISE(ABORT, 'payload must be valid JSON'); END;
 
 CREATE TRIGGER IF NOT EXISTS guard_project_registered BEFORE INSERT ON events
-WHEN NEW.type IN ('TaskDrafted', 'ArtifactRecorded')
+WHEN NEW.type IN ('TaskDrafted', 'ArtifactRecorded', 'Released')
  AND (json_extract(NEW.payload, '$.project') IS NULL
       OR NOT EXISTS (SELECT 1 FROM projects WHERE name = json_extract(NEW.payload, '$.project')))
 BEGIN SELECT RAISE(ABORT, 'project missing or not registered'); END;
@@ -72,6 +74,11 @@ WHEN NEW.type = 'Failed'
  AND coalesce((SELECT status FROM tasks WHERE task_id = NEW.task_id), 'NONE') NOT IN ('DELEGATED', 'REPORTED', 'REWORK')
 BEGIN SELECT RAISE(ABORT, 'Failed allowed only from DELEGATED/REPORTED/REWORK'); END;
 
+CREATE TRIGGER IF NOT EXISTS guard_dropped BEFORE INSERT ON events
+WHEN NEW.type = 'Dropped'
+ AND coalesce((SELECT status FROM tasks WHERE task_id = NEW.task_id), 'NONE') <> 'DRAFT'
+BEGIN SELECT RAISE(ABORT, 'Dropped allowed only from DRAFT'); END;
+
 CREATE TRIGGER IF NOT EXISTS guard_link BEFORE INSERT ON events
 WHEN NEW.type = 'TaskLinked'
  AND (NOT EXISTS (SELECT 1 FROM tasks WHERE task_id = NEW.task_id)
@@ -87,8 +94,8 @@ CREATE TABLE IF NOT EXISTS tasks (
     title         TEXT,
     task_text     TEXT,
     report_text   TEXT,
-    status        TEXT,  -- DRAFT / DELEGATED / REPORTED / ACCEPTED / REWORK / FAILED
-    outcome       TEXT,  -- accepted / reworked / failed
+    status        TEXT,  -- DRAFT / DELEGATED / REPORTED / ACCEPTED / REWORK / FAILED / DROPPED
+    outcome       TEXT,  -- accepted / reworked / failed / dropped
     evidence      TEXT,  -- чем подтверждена приёмка: хэш коммита, ссылка на прогон
     executor      TEXT,
     created_at    TEXT,
@@ -193,6 +200,15 @@ WHEN NEW.type = 'Failed'
 BEGIN
     UPDATE tasks SET status = 'FAILED',
                      outcome = 'failed',
+                     updated_at = NEW.at
+    WHERE task_id = NEW.task_id;
+END;
+
+CREATE TRIGGER IF NOT EXISTS evt_dropped AFTER INSERT ON events
+WHEN NEW.type = 'Dropped'
+BEGIN
+    UPDATE tasks SET status = 'DROPPED',
+                     outcome = 'dropped',
                      updated_at = NEW.at
     WHERE task_id = NEW.task_id;
 END;

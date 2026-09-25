@@ -7,6 +7,8 @@ import { createServer } from "node:http";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { localDay } from "./local-day.mjs";
+
 const ROOT = dirname(dirname(dirname(fileURLToPath(import.meta.url))));
 export const SCHEMA = join(ROOT, "schema.sql");
 export const SERVER = join(ROOT, "server.mjs");
@@ -18,10 +20,10 @@ export const OTHER_WS = { id: "ws-other", slug: "other-space", name: "Other" };
 export const ME = { id: "u-me", name: "Алексей" };
 export const LEAD = { id: "u-lead", name: "Лид" };
 
-// Дата задачи журнала: сервер собирает id из ЛОКАЛЬНОЙ даты (DRAFT
-// actari/2026-09-05-mcp-task-id-tz) — тесты гоняются с TZ=UTC.
+// Дата задачи журнала: сервер собирает id из ЛОКАЛЬНОЙ даты (today() в
+// server.mjs) — так же строит её общий тестовый хелпер localDay().
 export function today() {
-	return new Date().toISOString().slice(0, 10);
+	return localDay();
 }
 
 export function cleanEnv(extra = {}) {
@@ -139,6 +141,9 @@ export function startIntentCloud(
 		intentGets: 0,
 		changesQueries: [],
 		releaseOverride: null,
+		publishes: [],
+		publishOverride: null,
+		published: new Map(),
 	};
 
 	// Реальные часы плюс монотонность: если Date.now() не вырос, +1 мс.
@@ -368,6 +373,48 @@ export function startIntentCloud(
 
 			if (path.includes("/api/mcp/intents")) {
 				if (!intentsRoute) return send(404, { error: "Unknown endpoint" });
+				if (req.method === "POST" && path.endsWith("/api/mcp/intents")) {
+					state.publishes.push(body);
+					if (state.publishOverride) {
+						const over = state.publishOverride;
+						state.publishOverride = null;
+						if (over.status === 403) return send(403, { error: "Not a member of this workspace" });
+						return send(over.status ?? 409, { reason: over.reason, intent: over.intent ?? null });
+					}
+					const key = `${body.workspaceId}/${body.project}/${body.slug}`;
+					const reply = (outcome, view) =>
+						send(200, {
+							outcome,
+							intentId: view.id,
+							featureId: view.feature.id,
+							criteriaVersion: view.criteriaVersion,
+							intent: view,
+						});
+					if (body.intentTaskId) {
+						const view = state.views.get(body.intentTaskId);
+						if (!view) return send(404, { error: "Intent not found" });
+						const had = state.published.get(key)?.id === view.id;
+						state.published.set(key, { id: view.id, text: body.text });
+						return reply(had ? "unchanged" : "bound", view);
+					}
+					const known = state.published.get(key);
+					if (!known) {
+						const n = state.published.size + 1;
+						const view = addIntent(`intent-pub-${n}`, {
+							title: body.title,
+							acceptanceCriteria: body.acceptanceCriteria,
+							feature: { id: `f-pub-${n}`, title: body.title, status: "IN_PROGRESS" },
+						});
+						state.published.set(key, { id: view.id, text: body.text });
+						return reply("created", view);
+					}
+					const view = get(known.id);
+					const criteriaChanged = view.acceptanceCriteria !== body.acceptanceCriteria;
+					if (!criteriaChanged && known.text === body.text) return reply("unchanged", view);
+					if (criteriaChanged) helpers.changeCriteria(view.id, body.acceptanceCriteria);
+					known.text = body.text;
+					return reply("updated", view);
+				}
 				if (path.endsWith("/intents/changes")) {
 					const since = url.searchParams.get("since");
 					state.changesQueries.push(since);

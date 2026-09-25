@@ -11,11 +11,14 @@ full-text search) exposed as an MCP server. Zero dependencies — only
 Node.js >= 22.5 with the built-in `node:sqlite`.
 
 The journal knows one thing for sure: `DRAFT → DELEGATED → REPORTED →
-ACCEPTED | REWORK | FAILED`, where *reported* (the executor believes it is
-done) is never the same as *accepted* (confirmed by a check). Everything
-else — what a task must contain, what a report must show, what counts as
-acceptance — is a **policy**: data you set per project or per cloud
-workspace, not opinions baked into the package.
+ACCEPTED | REWORK | FAILED`, plus `DRAFT → DROPPED` through `drop_task` (drop
+a draft you no longer want, with a reason), where *reported* (the executor
+believes it is done) is never the same as *accepted* (confirmed by a check).
+Everything else — what a task must contain, what a report must show, what
+counts as acceptance — is a **policy**: data you set per project or per cloud
+workspace, not opinions baked into the package. A separate act,
+`record_release`, records what shipped to prod (`Released`) — not tied to
+any single task.
 
 ## Quick start
 
@@ -92,6 +95,10 @@ connect { "token": "act_..." }
 A human can cancel, close or take back an intent and change its acceptance
 criteria; the server then refuses the next act and says why. `intent_status`
 shows the intent; `release_intent` gives a taken intent back.
+
+`publish_intent` publishes a brief to the cloud: it creates or updates a
+feature and its intent keyed by `(project, slug)`; a card closed by a human
+is never recreated.
 
 ### Self-hosted (on-premise)
 

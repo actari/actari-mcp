@@ -34,6 +34,7 @@ import {
 	resolveCloudUrl,
 	resolveSyncScope,
 	shouldSyncEvent,
+	syncConfigPath,
 	syncStateKey,
 	syncStatePath,
 	syncUrlFromBase,
@@ -358,6 +359,33 @@ function startMcp(t, env) {
 	return { call, tool, getStderr: () => stderr };
 }
 
+// ============ homedir: хелперы без dbPath не лезут в настоящий домашний каталог ============
+//
+// ОПАСНОСТЬ: до починки writeSyncConfig без dbPath пишет в НАСТОЯЩИЙ
+// ~/.actari/sync.json. Поэтому здесь — только чистый syncConfigPath (строит
+// путь, ничего не пишет и не читает); тест с записью — в задаче отдельно,
+// после починки, тоже под временным homedir.
+
+test("syncConfigPath без dbPath строит путь под переданным homedir", () => {
+	const home = mkdtempSync(join(tmpdir(), "actari-home-"));
+	const path = syncConfigPath({ env: {}, homedir: home });
+	assert.ok(path.startsWith(home), path);
+});
+
+test("writeSyncConfig/loadSyncConfig без dbPath пишут и читают под переданным homedir", () => {
+	const home = mkdtempSync(join(tmpdir(), "actari-home-"));
+	const env = {}; // без ACTARI_DB — путь из homedir
+	writeSyncConfig({
+		env,
+		homedir: home,
+		config: { url: "https://x.dev/api/journal/sync", token: "t", journalId: "j" },
+	});
+	const expected = syncConfigPath({ env, homedir: home });
+	assert.ok(expected.startsWith(home), expected);
+	assert.ok(existsSync(expected));
+	assert.equal(loadSyncConfig({ env, homedir: home, log: () => {} })?.journalId, "j");
+});
+
 // ============ loadSyncConfig ============
 
 test("loadSyncConfig: нет файла и env → синк выключен (null)", () => {
@@ -523,6 +551,92 @@ test("pushJournal: полный пуш с нуля, повтор, докат", a
 	r = await pushJournal({ dbPath, config });
 	assertOneTarget(r, { pushed: 3, lastSeq: 13 });
 	assert.equal(cloudCursor(cloud), 13);
+});
+
+test("pushJournal: Dropped уходит в push как обычное lifecycle-событие", async (t) => {
+	const dir = tmpDir();
+	const dbPath = join(dir, "journal.db");
+	const { db, raw } = openDb(dbPath);
+	db.exec(readFileSync(SCHEMA, "utf8"));
+	raw("_general", "ProjectRegistered", { name: "test", root_path: "/tmp/test" });
+	raw("test/dropped-one", "TaskDrafted", { project: "test", title: "Черновик", task_text: "x" });
+	raw("test/dropped-one", "Dropped", { reason: "передумали" });
+	db.close();
+
+	let capturedEvents = [];
+	const cloud = await startMockCloud(t, {
+		postWarnings: (events) => {
+			capturedEvents = events;
+			return [];
+		},
+	});
+	const config = { url: cloud.url, token: TOKEN, journalId: JOURNAL };
+
+	const r = await pushJournal({ dbPath, config });
+	assertOneTarget(r, { pushed: 3, lastSeq: 3 });
+	assert.ok(
+		capturedEvents.some((e) => e.type === "Dropped" && e.taskId === "test/dropped-one"),
+		"событие Dropped есть в принятом облаком батче",
+	);
+});
+
+test("pushJournal: Released уходит в push, eventProject берёт проект из payload", async (t) => {
+	const dir = tmpDir();
+	const dbPath = join(dir, "journal.db");
+	const { db, raw } = openDb(dbPath);
+	db.exec(readFileSync(SCHEMA, "utf8"));
+	raw("_general", "ProjectRegistered", { name: "test", root_path: "/tmp/test" });
+	raw("_general", "Released", { project: "test", items: ["a", "b"], ref: "f718d55" });
+	db.close();
+
+	let capturedEvents = [];
+	const cloud = await startMockCloud(t, {
+		postWarnings: (events) => {
+			capturedEvents = events;
+			return [];
+		},
+	});
+	const config = { url: cloud.url, token: TOKEN, journalId: JOURNAL };
+
+	const r = await pushJournal({ dbPath, config });
+	assertOneTarget(r, { pushed: 2, lastSeq: 2 });
+	assert.ok(
+		capturedEvents.some((e) => e.type === "Released" && e.taskId === "_general"),
+		"событие Released есть в принятом облаком батче",
+	);
+});
+
+test("pushJournal: область синка — Released чужого проекта не уезжает", async (t) => {
+	const dir = tmpDir();
+	const dbPath = join(dir, "journal.db");
+	const { db, raw } = openDb(dbPath);
+	db.exec(readFileSync(SCHEMA, "utf8"));
+	raw("_general", "ProjectRegistered", {
+		name: "alpha",
+		root_path: "/tmp/alpha",
+		cloud_workspace_id: WORKSPACE,
+	});
+	raw("_general", "ProjectRegistered", {
+		name: "beta",
+		root_path: "/tmp/beta",
+		cloud_workspace_id: OTHER_WORKSPACE,
+	});
+	raw("_general", "Released", { project: "alpha", items: ["a"] });
+	raw("_general", "Released", { project: "beta", items: ["b"] });
+	db.close();
+
+	const cloud = await startMockCloud(t, { workspaces: [ALPHA_WS, OTHER_WS] });
+	const r = await pushJournal({
+		dbPath,
+		env: {},
+		config: { url: cloud.baseUrl, token: TOKEN, journalId: JOURNAL },
+	});
+
+	// ProjectRegistered при заданной области не уезжает никому (shouldSyncEvent);
+	// каждому пространству едет только свой Released.
+	assert.equal(r.pushed, 2);
+	assert.deepEqual(appliedSeqs(cloud, { workspaceId: WORKSPACE }), [3]);
+	assert.deepEqual(appliedSeqs(cloud, { workspaceId: OTHER_WORKSPACE }), [4]);
 });
 
 test("pushJournal: предупреждения облака доходят до результата с пространством", async (t) => {
@@ -954,6 +1068,7 @@ test("eventProject: проект события выводится для каж
 		"Accepted",
 		"ReworkRequested",
 		"Failed",
+		"Dropped",
 		"TaskLinked",
 	]) {
 		assert.equal(
@@ -977,6 +1092,12 @@ test("eventProject: проект события выводится для каж
 		"alpha",
 	);
 	assert.equal(eventProject({ taskId: "_general", type: "IncidentRecorded", payload: {} }), null);
+	// Released — как ArtifactRecorded/TaskDrafted, из payload.project (task_id всегда _general)
+	assert.equal(
+		eventProject({ taskId: "_general", type: "Released", payload: { project: "alpha" } }),
+		"alpha",
+	);
+	assert.equal(eventProject({ taskId: "_general", type: "Released", payload: {} }), null);
 });
 
 test("parseSyncProjects: список через запятую, пустая строка = не задано", () => {

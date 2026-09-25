@@ -13,6 +13,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { inboxUrlFromSyncUrl } from "../sync.mjs";
+import { localDay } from "./support/local-day.mjs";
 
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 const SCHEMA = join(ROOT, "schema.sql");
@@ -334,7 +335,7 @@ test("draft_task: intent_task_id уезжает в payload события TaskDr
 	assert.equal(r.ok, true);
 
 	r = await c.tool("get_task", {
-		task_id: `demo/${new Date().toISOString().slice(0, 10)}-with-intent`,
+		task_id: `demo/${localDay()}-with-intent`,
 		full: true,
 	});
 	assert.equal(r.ok, true);
@@ -350,7 +351,7 @@ test("draft_task: intent_task_id уезжает в payload события TaskDr
 	});
 	assert.equal(r.ok, true);
 	r = await c.tool("get_task", {
-		task_id: `demo/${new Date().toISOString().slice(0, 10)}-plain`,
+		task_id: `demo/${localDay()}-plain`,
 		full: true,
 	});
 	const plain = r.data.events.find((e) => e.type === "TaskDrafted");

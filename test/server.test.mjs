@@ -84,7 +84,7 @@ test("handshake: initialize, tools, prompts, instructions", async (t) => {
 	assert.deepEqual(Object.keys(init.capabilities).sort(), ["prompts", "tools"]);
 
 	const tools = (await c.call("tools/list")).result.tools.map((x) => x.name);
-	assert.equal(tools.length, 26);
+	assert.equal(tools.length, 29);
 	for (const name of [
 		"search_precedents",
 		"draft_task",
@@ -99,8 +99,11 @@ test("handshake: initialize, tools, prompts, instructions", async (t) => {
 		"sync_scope",
 		"inbox",
 		"take",
+		"publish_intent",
 		"get_policy",
 		"set_policy",
+		"drop_task",
+		"record_release",
 	])
 		assert.ok(tools.includes(name), name);
 
@@ -216,6 +219,132 @@ test("mark_failed из зависшей делегации", async (t) => {
 	const r = await c.tool("mark_failed", { task_id: id, reason: "shell SIGSEGV" });
 	assert.equal(r.data.status, "FAILED");
 	assert.equal(r.data.outcome, "failed");
+});
+
+test("drop_task: отказ от черновика из DRAFT", async (t) => {
+	const c = startClient(t);
+	await reg(c, "test");
+	const id = "test/dup-draft";
+	await c.tool("draft_task", { task_id: id, project: "test", title: "т", task_text: "x" });
+
+	const r = await c.tool("drop_task", { task_id: id, reason: "дубль" });
+	assert.equal(r.ok, true, r.error);
+	assert.equal(r.data.status, "DROPPED");
+	assert.equal(r.data.outcome, "dropped");
+
+	const hist = await c.tool("get_task", { task_id: id, full: true });
+	assert.equal(hist.data.task.status, "DROPPED");
+	assert.equal(hist.data.task.outcome, "dropped");
+	const last = hist.data.events.at(-1);
+	assert.equal(last.type, "Dropped");
+	assert.deepEqual(JSON.parse(last.payload), { reason: "дубль" });
+});
+
+test("drop_task: отказ из DELEGATED с подсказкой mark_failed", async (t) => {
+	const c = startClient(t);
+	await reg(c, "test");
+	const id = "test/drop-delegated";
+	await c.tool("draft_task", { task_id: id, project: "test", title: "т", task_text: "x" });
+	await c.tool("delegate", { task_id: id, executor: "grok" });
+
+	const r = await c.tool("drop_task", { task_id: id, reason: "передумали" });
+	assert.equal(r.ok, false);
+	assert.match(r.error, /недопустим из статуса DELEGATED/);
+	assert.match(r.error, /mark_failed/);
+});
+
+test("drop_task: по уже закрытой задаче — отказ", async (t) => {
+	const c = startClient(t);
+	await reg(c, "test");
+	const id = "test/drop-twice";
+	await c.tool("draft_task", { task_id: id, project: "test", title: "т", task_text: "x" });
+	await c.tool("drop_task", { task_id: id, reason: "первый отказ" });
+
+	const r = await c.tool("drop_task", { task_id: id, reason: "второй отказ" });
+	assert.equal(r.ok, false);
+	assert.match(r.error, /уже закрыта/);
+});
+
+test("drop_task: без причины — отказ, статус не меняется", async (t) => {
+	const c = startClient(t);
+	await reg(c, "test");
+	const id = "test/drop-empty-reason";
+	await c.tool("draft_task", { task_id: id, project: "test", title: "т", task_text: "x" });
+
+	const r = await c.tool("drop_task", { task_id: id, reason: "   " });
+	assert.equal(r.ok, false);
+	assert.match(r.error, /причин/i);
+
+	const task = await c.tool("get_task", { task_id: id });
+	assert.equal(task.data.task.status, "DRAFT");
+});
+
+test("drop_task: list_tasks и search_precedents находят отменённую задачу", async (t) => {
+	const c = startClient(t);
+	await reg(c, "test");
+	const id = "test/drop-findable";
+	await c.tool("draft_task", {
+		task_id: id,
+		project: "test",
+		title: "Уникальнозаголовочный дропнутый",
+		task_text: "x",
+	});
+	await c.tool("drop_task", { task_id: id, reason: "не актуально" });
+
+	const list = await c.tool("list_tasks", { status: "DROPPED" });
+	assert.ok(
+		list.data.some((x) => x.task_id === id),
+		"list_tasks находит отменённую",
+	);
+
+	const found = await c.tool("search_precedents", { query: "Уникальнозаголовочный" });
+	assert.ok(
+		found.data.tasks.some((x) => x.task_id === id && x.status === "DROPPED"),
+		"search_precedents находит отменённую со статусом DROPPED",
+	);
+});
+
+test("record_release: пишет Released с нормализованным payload", async (t) => {
+	const c = startClient(t);
+	await reg(c, "test");
+
+	const r = await c.tool("record_release", {
+		project: "test",
+		items: [" a ", "b", "a", ""],
+		ref: "f718d55",
+		summary: "  ",
+	});
+	assert.equal(r.ok, true, r.error);
+
+	const db = new DatabaseSync(c.dbPath);
+	t.after(() => db.close());
+	const last = db
+		.prepare("SELECT task_id, type, payload FROM events ORDER BY seq DESC LIMIT 1")
+		.get();
+	assert.equal(last.type, "Released");
+	assert.equal(last.task_id, "_general");
+	assert.deepEqual(JSON.parse(last.payload), {
+		project: "test",
+		items: ["a", "b"],
+		ref: "f718d55",
+	});
+});
+
+test("record_release: пустые items — отказ", async (t) => {
+	const c = startClient(t);
+	await reg(c, "test");
+
+	const r = await c.tool("record_release", { project: "test", items: ["", "  "] });
+	assert.equal(r.ok, false);
+	assert.match(r.error, /нужен хотя бы один пункт выпуска/);
+});
+
+test("record_release: незарегистрированный проект — отказ", async (t) => {
+	const c = startClient(t);
+
+	const r = await c.tool("record_release", { project: "ghost", items: ["a"] });
+	assert.equal(r.ok, false);
+	assert.match(r.error, /not registered/);
 });
 
 test("draft_task: guards id и slug", async (t) => {
