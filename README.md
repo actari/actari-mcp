@@ -92,6 +92,12 @@ workspace you are a member of, and the journal is routed between them by
 connect { "token": "act_..." }
 ```
 
+Tokens come in two kinds: **write** (the default) and **read-only**. `connect`
+and `sync` require a write token; a read-only token gets `403 read-only token`.
+For agents that only need to read the cloud journal, use the separate package
+[`actari-reader`](https://www.npmjs.com/package/actari-reader)
+(`npx -y actari-reader`) together with a read-only token.
+
 A human can cancel, close or take back an intent and change its acceptance
 criteria; the server then refuses the next act and says why. `intent_status`
 shows the intent; `release_intent` gives a taken intent back.
