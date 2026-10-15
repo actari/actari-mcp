@@ -7,6 +7,7 @@
 import { normalizeBaseUrl } from "./sync.mjs";
 
 export const INTENTS_PATH = "/api/mcp/intents";
+export const WORK_LOGS_PATH = "/api/mcp/work-logs";
 export const INTENT_TIMEOUT_MS = 2000;
 export const INTENT_POLL_MS = 60_000;
 // Совпадает с CHANGE_LIMIT облака (packages/core listChanges).
@@ -425,6 +426,10 @@ export function intentsUrlFromBase(base) {
 	return `${normalizeBaseUrl(base)}${INTENTS_PATH}`;
 }
 
+export function workLogsUrlFromBase(base) {
+	return `${normalizeBaseUrl(base)}${WORK_LOGS_PATH}`;
+}
+
 // ============ клиент API намерений ============
 
 function authHeaders(target, extra = {}) {
@@ -530,6 +535,61 @@ export async function postIntentPublish({ target, body, timeoutMs = INTENT_TIMEO
 	if (res.status === 400)
 		return { kind: "invalid", issues: Array.isArray(payload?.issues) ? payload.issues : [] };
 	return { kind: "unavailable", error: `HTTP ${res.status}` };
+}
+
+// log_time (спека time-tracking Р11–Р12): списание времени в облаке. 404 с
+// текстом задачи — задачи нет в этой цели; любой другой 404 — старое облако
+// без маршрута. Локальная SQLite не участвует.
+export async function postWorkLog({ target, body, timeoutMs = INTENT_TIMEOUT_MS }) {
+	let res;
+	try {
+		res = await fetch(workLogsUrlFromBase(target.url), {
+			method: "POST",
+			headers: authHeaders(target, { "content-type": "application/json" }),
+			body: JSON.stringify(body),
+			signal: AbortSignal.timeout(timeoutMs),
+		});
+	} catch (err) {
+		return { kind: "unavailable", error: networkError(err) };
+	}
+	const payload = await readJson(res);
+	if (res.status === 201 && payload && typeof payload.id === "string") {
+		return { kind: "ok", body: payload };
+	}
+	if (res.status === 404) {
+		return payload?.error === WORK_LOG_TASK_NOT_FOUND
+			? { kind: "not_found" }
+			: { kind: "unsupported" };
+	}
+	if (res.status === 403) return { kind: "forbidden" };
+	if (res.status === 400) {
+		return { kind: "invalid", error: typeof payload?.error === "string" ? payload.error : null };
+	}
+	return { kind: "unavailable", error: `HTTP ${res.status}` };
+}
+
+const WORK_LOG_TASK_NOT_FOUND = "Задача не найдена";
+
+// 90 → «1 ч 30 мин», 45 → «45 мин», 120 → «2 ч» (как formatWorkMinutes в core).
+export function formatWorkMinutes(minutes) {
+	const total = Math.max(0, Math.round(minutes));
+	const h = Math.floor(total / 60);
+	const m = total % 60;
+	if (h === 0) return `${m} мин`;
+	if (m === 0) return `${h} ч`;
+	return `${h} ч ${m} мин`;
+}
+
+// 210 → «3,5 ч», 120 → «2 ч»: одна цифра после запятой, без «,0» (как formatWorkHours в core).
+export function formatWorkHours(minutes) {
+	const tenths = Math.round((Math.max(0, minutes) / 60) * 10);
+	const whole = Math.floor(tenths / 10);
+	const frac = tenths % 10;
+	return frac === 0 ? `${whole} ч` : `${whole},${frac} ч`;
+}
+
+export function formatWorkLogResult(body) {
+	return `Списано ${formatWorkMinutes(body.minutes)} на задачу ${body.taskTitle} (${body.date}). Факт задачи: ${formatWorkHours(body.totalMinutes)}`;
 }
 
 export function formatPublishResult(body) {

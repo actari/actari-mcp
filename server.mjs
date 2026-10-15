@@ -61,10 +61,12 @@ import {
 	formatSyncWarning,
 	formatTakeContext,
 	formatTakeRejection,
+	formatWorkLogResult,
 	formatWhen,
 	parseJournalAt,
 	postIntentPublish,
 	postIntentRelease,
+	postWorkLog,
 	readIntentCache,
 	readIntentMeta,
 	seenOf,
@@ -865,11 +867,33 @@ const TOOLS = [
 			properties: {
 				task_id: { type: "string" },
 				report: { type: "string", description: "Полный текст отчёта исполнителя" },
+				duration_minutes: {
+					type: "number",
+					minimum: 1,
+					maximum: 1440,
+					description:
+						"Сколько минут заняла работа (необязательно): если передано, облако считает время AI по ней",
+				},
 			},
 			required: ["task_id", "report"],
 		},
-		handler: ({ task_id, report }) =>
-			emitWithIntentGate(task_id, "ReportSubmitted", "report", { report }),
+		handler: ({ task_id, report, duration_minutes }) => {
+			// tool-args проверяет только базовый тип: целость и диапазон — здесь, до события.
+			if (duration_minutes !== undefined && duration_minutes !== null) {
+				if (
+					!Number.isInteger(duration_minutes) ||
+					duration_minutes < 1 ||
+					duration_minutes > 1440
+				) {
+					throw new Error("duration_minutes — целое число минут от 1 до 1440; отчёт не записан");
+				}
+				return emitWithIntentGate(task_id, "ReportSubmitted", "report", {
+					report,
+					duration_minutes,
+				});
+			}
+			return emitWithIntentGate(task_id, "ReportSubmitted", "report", { report });
+		},
 	},
 	{
 		name: "accept",
@@ -1802,6 +1826,84 @@ const TOOLS = [
 			throw new Error(
 				`нет доступа к пространству ${row.cloud_workspace_id} ни в одной цели синка (403)`,
 			);
+		},
+	},
+	{
+		name: "log_time",
+		description:
+			"Списать время на задачу в облаке — от имени владельца токена, как «Списать время» в карточке. " +
+			"task_id — id задачи облака либо id задачи журнала (берётся её намерение, intent_task_id). " +
+			"hours — часы числом (1.5 = 1 ч 30 мин), минимум 15 минут; date — ГГГГ-ММ-ДД, по умолчанию сегодня. " +
+			"Пишет только в облако, локальный журнал не меняется; без доступа к облаку — ошибка.",
+		inputSchema: {
+			type: "object",
+			properties: {
+				task_id: {
+					type: "string",
+					description: "Id задачи облака или задачи журнала (с intent_task_id)",
+				},
+				hours: { type: "number", description: "Часы, больше 0: 1.5 = 1 ч 30 мин" },
+				date: { type: "string", description: "Дата списания ГГГГ-ММ-ДД, по умолчанию сегодня" },
+				note: { type: "string", description: "Комментарий к списанию" },
+			},
+			required: ["task_id", "hours"],
+		},
+		handler: async ({ task_id, hours, date, note }) => {
+			if (!(hours > 0)) {
+				throw new Error("hours должно быть числом больше 0 (часы, например 1.5); время не списано");
+			}
+			if (date !== undefined && date !== null && !/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+				throw new Error("date — дата в формате ГГГГ-ММ-ДД; время не списано");
+			}
+			let cloudTaskId = task_id;
+			if (task_id.includes("/")) {
+				cloudTaskId = intentOfJournalTask(task_id);
+				if (!cloudTaskId) {
+					throw new Error(
+						`Задача журнала ${task_id} не связана с задачей облака (нет intent_task_id) — время не списано`,
+					);
+				}
+			}
+			const targets = orderedTargets(readIntentCache(db, cloudTaskId)?.target_url);
+			if (targets.length === 0) {
+				throw new Error(
+					"Облако не подключено (нет sync.json) — log_time пишет только в облако, локально ничего не записано. Подключи: connect",
+				);
+			}
+			const body = {
+				taskId: cloudTaskId,
+				minutes: Math.round(hours * 60),
+				date: date ?? today(),
+				...(typeof note === "string" && note !== "" ? { note } : {}),
+			};
+			const errors = [];
+			let forbidden = false;
+			let unsupported = false;
+			// Задача живёт в одной из целей: 404 — следующая.
+			for (const target of targets) {
+				const result = await postWorkLog({ target, body, timeoutMs: INBOX_TIMEOUT });
+				if (result.kind === "ok") return formatWorkLogResult(result.body);
+				if (result.kind === "invalid") {
+					throw new Error(result.error ?? "облако отклонило списание: неверный запрос");
+				}
+				if (result.kind === "forbidden") forbidden = true;
+				else if (result.kind === "unsupported") unsupported = true;
+				else if (result.kind === "unavailable") errors.push(result.error);
+			}
+			if (forbidden) {
+				throw new Error(
+					"Нет прав списывать время на задачу (токен только для чтения или роль наблюдателя)",
+				);
+			}
+			if (errors.length > 0) {
+				throw new Error(`Облако недоступно: ${errors.join("; ")} — время не списано`);
+			}
+			if (unsupported) {
+				throw new Error(
+					"облако не поддерживает log_time (старая версия сервера) — время не списано",
+				);
+			}
+			throw new Error(`Задача ${cloudTaskId} не найдена в облаке — время не списано`);
 		},
 	},
 	{

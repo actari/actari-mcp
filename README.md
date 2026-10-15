@@ -106,6 +106,14 @@ shows the intent; `release_intent` gives a taken intent back.
 feature and its intent keyed by `(project, slug)`; a card closed by a human
 is never recreated.
 
+`log_time { task_id, hours, date?, note? }` logs time on a cloud task as the
+token's owner, exactly like "Log time" in the task card (minimum 15 minutes,
+`hours: 1.5` = 1 h 30 min, `date` defaults to today). `task_id` is a cloud
+task id or a journal task id that has an `intent_task_id`. It writes **only to
+the cloud** — never to the local journal — and fails with a clear message when
+no cloud is connected. `submit_report` accepts an optional `duration_minutes`
+(integer, 1–1440); when given, the cloud uses it as the AI time of the task.
+
 ### Self-hosted (on-premise)
 
 Pass the **base URL** of your instance; endpoint paths are derived by the server,

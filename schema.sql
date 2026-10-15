@@ -12,7 +12,7 @@ CREATE TABLE IF NOT EXISTS events (
     type    TEXT NOT NULL CHECK (type IN (
                 'TaskDrafted',      -- payload: project, title, task_text
                 'Delegated',        -- payload: executor
-                'ReportSubmitted',  -- payload: report
+                'ReportSubmitted',  -- payload: report, duration_minutes? (целое 1..1440)
                 'Accepted',         -- payload: outcome, evidence
                 'ReworkRequested',  -- payload: reason
                 'Failed',           -- payload: reason

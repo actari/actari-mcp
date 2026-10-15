@@ -128,6 +128,8 @@ export function startIntentCloud(
 		missingIntentIds = [],
 		hang = [],
 		changesLimit = 100,
+		// задачи облака, на которые принимаются списания: id -> { title, totalMinutes }
+		workLogTasks = {},
 	} = {},
 ) {
 	const state = {
@@ -144,6 +146,8 @@ export function startIntentCloud(
 		publishes: [],
 		publishOverride: null,
 		published: new Map(),
+		workLogs: [],
+		workLogOverride: null,
 	};
 
 	// Реальные часы плюс монотонность: если Date.now() не вырос, +1 мс.
@@ -368,6 +372,26 @@ export function startIntentCloud(
 						recommendedSlug: `intent-${view.id}`,
 					},
 					intent: view,
+				});
+			}
+
+			if (path.endsWith("/api/mcp/work-logs")) {
+				if (req.method !== "POST") return send(404, { error: "Unknown endpoint" });
+				state.workLogs.push(body);
+				if (state.workLogOverride) {
+					const over = state.workLogOverride;
+					state.workLogOverride = null;
+					return send(over.status, { error: over.error });
+				}
+				const task = workLogTasks[body.taskId];
+				if (!task) return send(404, { error: "Задача не найдена" });
+				task.totalMinutes = (task.totalMinutes ?? 0) + body.minutes;
+				return send(201, {
+					id: `wl-${state.workLogs.length}`,
+					minutes: body.minutes,
+					date: body.date,
+					taskTitle: task.title,
+					totalMinutes: task.totalMinutes,
 				});
 			}
 

@@ -54,6 +54,7 @@ that is the **project's policy**, data the server reads from `policy.json`
 | Overview | `get_task`, `list_tasks`, `link_tasks` |
 | Policy | `get_policy`, `set_policy` |
 | Cloud (optional) | `connect`, `sync_scope`, `sync`, `inbox`, `take`, `intent_status`, `release_intent`, `publish_intent` |
+| Time (cloud only) | `log_time` (log hours on a cloud task as the token owner; never writes locally) |
 
 Prompts: `tasks` (show the journal), `bootstrap` (create the artifact the
 policy requires before drafting, if any).
@@ -81,3 +82,5 @@ write is then pushed upstream. `sync_scope` binds projects to workspaces.
 `sync` forces a push and refreshes the cached workspace policies. `inbox` /
 `take` pull task intents from the cloud. The cloud never rewrites the
 journal. A human can cancel, close or take back an intent and change its acceptance criteria; the server then refuses the next act and says why. `intent_status` shows the intent; `release_intent` gives a taken intent back. `publish_intent` publishes a brief to the cloud: it creates or updates a feature and its intent keyed by `(project, slug)`; a card closed by a human is never recreated.
+
+`log_time { task_id, hours, date?, note? }` logs time on a cloud task (a cloud task id, or a journal task id that has an `intent_task_id`); minimum 15 minutes, `date` defaults to today, nothing is written to the local journal. When you submit a report, pass `duration_minutes` (integer 1–1440) if you know how long the work took — the cloud then uses it as the AI time instead of estimating.

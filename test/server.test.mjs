@@ -84,7 +84,7 @@ test("handshake: initialize, tools, prompts, instructions", async (t) => {
 	assert.deepEqual(Object.keys(init.capabilities).sort(), ["prompts", "tools"]);
 
 	const tools = (await c.call("tools/list")).result.tools.map((x) => x.name);
-	assert.equal(tools.length, 29);
+	assert.equal(tools.length, 30);
 	for (const name of [
 		"search_precedents",
 		"draft_task",
@@ -104,6 +104,7 @@ test("handshake: initialize, tools, prompts, instructions", async (t) => {
 		"set_policy",
 		"drop_task",
 		"record_release",
+		"log_time",
 	])
 		assert.ok(tools.includes(name), name);
 
