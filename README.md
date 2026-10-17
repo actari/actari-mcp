@@ -22,14 +22,30 @@ any single task.
 
 ## Quick start
 
-**Claude Code — two commands** (installs the MCP server *and* the skill):
+**What each part is for.** The **MCP server** (`actari-mcp`) is the journal on
+your machine: the agent keeps tasks, reports and artifacts in it with tools,
+and it pushes them to the cloud. The **skill** (`actari`) teaches the agent
+the journal protocol: register the project first, run a task from a human
+through the journal, publish a feature from a discussion with
+`publish_intent`, take work from the cloud with `inbox` / `take`. The
+**policy** holds the rules of drafting, reporting and accepting; it is set per
+project (`set_policy`) or in the cloud workspace and read with `get_policy`.
+The cloud adds the board, acceptance and the team on top of the journal.
+
+**1. Sign up and create a workspace** in the cloud, then **issue an MCP
+token** on the MCP tokens page (a write token — a read-only one cannot
+connect).
+
+**2. Install the plugin.**
+
+*Claude Code — two commands* (installs the MCP server *and* the skill):
 
 ```bash
 claude plugin marketplace add https://github.com/actari/actari-mcp
 claude plugin install actari@actari
 ```
 
-**Any other agent** — install the skill, then add the MCP server to your
+*Any other agent* — install the skill, then add the MCP server to your
 agent's MCP config:
 
 ```bash
@@ -39,6 +55,25 @@ npx skills add actari/actari-mcp
 ```json
 { "mcpServers": { "actari": { "command": "npx", "args": ["-y", "actari-mcp"] } } }
 ```
+
+**3. Connect to the cloud.** Tell the agent: "Connect actari: address
+`<your cloud address>`, token `act_...`". It calls `connect { "token": "act_..." }`
+(see [Connect to the cloud](#connect-to-the-cloud-optional)).
+
+**4. Register the project.** In the repository folder tell the agent:
+"Register this project in actari". Without a registered project the journal
+refuses every task.
+
+**5. Run the first task.** Either from the cloud — create a feature, add
+tasks, press "Take into work", then tell the agent "Take the task from the
+actari inbox" (`inbox` → `take`) — or from the terminal: "Do X and track it
+through the actari journal" (`draft_task` → `delegate` → `submit_report` →
+`accept`).
+
+**6. See it in the cloud.** The task shows up in the workspace "Journal" and
+on the feature board. If it does not: the project is not registered, Node.js
+is older than 22.5, the token is read-only, or you belong to several
+workspaces and need `sync_scope`.
 
 Optionally, pin the journal at the project level — copy this into your
 `AGENTS.md` / `CLAUDE.md`:

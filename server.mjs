@@ -10,6 +10,7 @@ import { existsSync, mkdirSync, readFileSync, renameSync, rmSync } from "node:fs
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { ADR_FORMAT_HINT, parseAdrSections } from "./adr.mjs";
 import { readEnv } from "./env.mjs";
 import { checkToolArguments, formatToolArgumentsError, formatUnknownHint } from "./tool-args.mjs";
 import {
@@ -603,10 +604,13 @@ const BASE_DESCRIPTIONS = {
 	delegate:
 		"Отметить делегацию задачи исполнителю (событие Delegated). Допустимо из DRAFT или REWORK. " +
 		"Запуск исполнителя — вне журнала.",
-	report: "Записать отчёт исполнителя (событие ReportSubmitted). Допустимо из DELEGATED.",
+	report:
+		"Записать отчёт исполнителя (событие ReportSubmitted). Допустимо из DELEGATED. " +
+		"Архитектурные решения, принятые в работе, — отдельным record_artifact kind=adr.",
 	accept:
 		"Принять задачу (событие Accepted). Допустимо из REPORTED. evidence — чем подтверждена " +
-		"приёмка (хэш коммита, ссылка на прогон); обязательность задаёт политика проекта.",
+		"приёмка (хэш коммита, ссылка на прогон); обязательность задаёт политика проекта. " +
+		"Проверь, что решения из спеки и отчёта записаны как adr.",
 };
 const describe = (act) => renderToolDescription(BASE_DESCRIPTIONS[act], STARTUP_POLICY, act);
 
@@ -1067,15 +1071,28 @@ const TOOLS = [
 		name: "record_artifact",
 		description:
 			"Зафиксировать артефакт: спеку, план, ADR, решение или заметку (событие ArtifactRecorded). " +
-			"Повторная запись с тем же title = новая версия (старая остаётся в истории).",
+			"Повторная запись с тем же title = новая версия (старая остаётся в истории). " +
+			"kind=adr — архитектурное решение, которое дорого отменить: выбор модели данных, библиотеки, " +
+			"протокола, границы модулей. Тело — markdown с разделами «## Контекст», «## Решение» " +
+			"(обязательны), «## Последствия», «## Альтернативы» (по желанию); без «Контекста» и «Решения» " +
+			"запись отклоняется. Привяжи ADR к задаче через task_id: так облако положит его в документы " +
+			"фичи. Повторная запись с тем же title обновляет тот же ADR.",
 		inputSchema: {
 			type: "object",
 			properties: {
 				project: { type: "string" },
-				kind: { type: "string", description: "spec | plan | adr | decision | note | doc" },
+				kind: {
+					type: "string",
+					description:
+						"spec | plan | adr | decision | note | doc. adr — архитектурное решение в формате " +
+						"«Контекст / Решение / Последствия / Альтернативы» (первые два раздела обязательны)",
+				},
 				title: { type: "string" },
 				body: { type: "string", description: "Полный текст артефакта (markdown)" },
-				task_id: { type: "string", description: "Опциональная привязка к задаче журнала" },
+				task_id: {
+					type: "string",
+					description: "Опциональная привязка к задаче журнала (для adr — чтобы облако нашло фичу)",
+				},
 			},
 			required: ["project", "kind", "title", "body"],
 		},
@@ -1084,6 +1101,10 @@ const TOOLS = [
 				throw new Error("kind: spec | plan | adr | decision | note | doc");
 			}
 			requireProject(project);
+			if (kind === "adr") {
+				const adr = parseAdrSections(body);
+				if (!adr.context || !adr.decision) throw new Error(ADR_FORMAT_HINT);
+			}
 			appendEvent(task_id, "ArtifactRecorded", JSON.stringify({ project, kind, title, body }));
 			return db
 				.prepare(
