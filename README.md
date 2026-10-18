@@ -18,7 +18,8 @@ Everything else — what a task must contain, what a report must show, what
 counts as acceptance — is a **policy**: data you set per project or per cloud
 workspace, not opinions baked into the package. A separate act,
 `record_release`, records what shipped to prod (`Released`) — not tied to
-any single task.
+any single task; pass `notes` (a human title and a one-line "what's new" per
+item) and the cloud builds the Telegram release message from them.
 
 ## Quick start
 

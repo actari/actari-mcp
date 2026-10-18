@@ -1001,7 +1001,7 @@ const TOOLS = [
 	{
 		name: "record_release",
 		description:
-			"Записать выпуск (событие Released): что уехало на прод в проекте. Пишет любой процесс выкатки после того, как изменения на проде. items — свободные строки (slug фич или что угодно), журнал их с задачами не сверяет; ref — коммит или тег выкатки. После sync облако рассылает уведомление о выпуске.",
+			"Записать выпуск (событие Released): что уехало на прод в проекте. Пишет любой процесс выкатки после того, как изменения на проде. items — свободные строки (slug фич или что угодно), журнал их с задачами не сверяет; ref — коммит или тег выкатки. После sync облако рассылает уведомление о выпуске. Передай notes — название и фразу «что нового» на каждый пункт: облако соберёт из них понятное сообщение о выпуске.",
 		inputSchema: {
 			type: "object",
 			properties: {
@@ -1013,10 +1013,27 @@ const TOOLS = [
 				},
 				ref: { type: "string", description: "Коммит или тег выкатки" },
 				summary: { type: "string", description: "Короткое пояснение (необязательно)" },
+				notes: {
+					type: "array",
+					description:
+						"Для людей, на каждый пункт items: название и одна фраза, что изменилось для пользователя (до 160 символов). Из них облако собирает сообщение о выпуске в Telegram; у фичи с карточкой в облаке название берётся из карточки, фраза — отсюда. Без notes пункт покажется slug'ом.",
+					items: {
+						type: "object",
+						properties: {
+							item: { type: "string", description: "Пункт из items" },
+							title: {
+								type: "string",
+								description: "Название для людей, напр. «Трекер Umami на actari.dev»",
+							},
+							note: { type: "string", description: "Одна фраза «что нового»" },
+						},
+						required: ["item", "title"],
+					},
+				},
 			},
 			required: ["project", "items"],
 		},
-		handler: ({ project, items, ref, summary }) => {
+		handler: ({ project, items, ref, summary, notes }) => {
 			const list = [
 				...new Set(
 					(Array.isArray(items) ? items : [])
@@ -1031,6 +1048,21 @@ const TOOLS = [
 			const summaryText = String(summary ?? "").trim();
 			if (refText) payload.ref = refText;
 			if (summaryText) payload.summary = summaryText;
+			const known = new Set(list);
+			const seen = new Set();
+			const noteList = [];
+			(Array.isArray(notes) ? notes : []).forEach((entry, index) => {
+				const item = String(entry?.item ?? "").trim();
+				const title = String(entry?.title ?? "").trim();
+				if (!known.has(item))
+					throw new Error(`record_release: notes[${index}].item «${item}» нет в items`);
+				if (!title) throw new Error(`record_release: notes[${index}].title пуст`);
+				if (seen.has(item)) return;
+				seen.add(item);
+				const note = String(entry?.note ?? "").trim();
+				noteList.push(note ? { item, title, note } : { item, title });
+			});
+			if (noteList.length > 0) payload.notes = noteList;
 			appendEvent("_general", "Released", JSON.stringify(payload));
 			const { seq } = db
 				.prepare("SELECT seq FROM events WHERE type = 'Released' ORDER BY seq DESC LIMIT 1")
@@ -2063,7 +2095,7 @@ const PROTOCOL_INSTRUCTIONS = `Журнал задач для AI-агентов 
 Продолжение закрытой задачи — новая задача + link_tasks kind=continues; найденная по ходу работа — новая задача + discovered_from. Rework-цикл живёт только внутри незакрытой задачи.
 Статусы меняются только через события журнала (инструменты), не через базу.
 Намерения облака: inbox → take → draft_task с intent_task_id. Человек может отменить, закрыть или забрать намерение и поменять критерии — сервер откажет в акте и скажет почему; intent_status показывает состояние, release_intent отпускает взятое. Фича из локального флоу: publish_intent { project, slug, title, text, acceptance_criteria } создаёт или обновляет в облаке фичу с намерением (ключ project+slug), дальше take.
-Выпуск на прод — record_release (событие Released, не привязано к задаче); после sync облако рассылает уведомление.`;
+Выпуск на прод — record_release (событие Released, не привязано к задаче) с notes — название и фраза «что нового» на каждый пункт; после sync облако рассылает уведомление.`;
 
 // Инструкции собираются на каждом initialize: политика и предупреждения — по
 // текущему состоянию файла и базы, а не по снимку старта.

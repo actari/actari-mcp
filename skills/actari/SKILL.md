@@ -76,7 +76,7 @@ that is the **project's policy**, data the server reads from `policy.json`
 | Registry | `resolve_project`, `register_project`, `list_projects` |
 | Task lifecycle | `draft_task`, `delegate`, `submit_report`, `accept`, `request_rework`, `mark_failed`, `drop_task` |
 | Knowledge | `search_precedents`, `record_artifact`, `get_artifact`, `list_artifacts`, `record_incident` |
-| Release | `record_release` (not tied to a task — records what shipped to prod) |
+| Release | `record_release` (not tied to a task — records what shipped to prod; pass `notes` with a human title and a one-line "what's new" per item — the cloud builds the Telegram release message from them) |
 | Overview | `get_task`, `list_tasks`, `link_tasks` |
 | Policy | `get_policy`, `set_policy` |
 | Cloud (optional) | `connect`, `sync_scope`, `sync`, `inbox`, `take`, `intent_status`, `release_intent`, `publish_intent` |

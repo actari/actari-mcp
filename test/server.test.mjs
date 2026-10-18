@@ -331,6 +331,51 @@ test("record_release: пишет Released с нормализованным payl
 	});
 });
 
+test("record_release: notes нормализуются в payload", async (t) => {
+	const c = startClient(t);
+	await reg(c, "test");
+	const r = await c.tool("record_release", {
+		project: "test",
+		items: ["a", "b"],
+		notes: [
+			{ item: " a ", title: " Трекер Umami ", note: " Считаем визиты. " },
+			{ item: "a", title: "Повтор" },
+			{ item: "b", title: "Цвет статуса", note: "  " },
+		],
+	});
+	assert.equal(r.ok, true, r.error);
+	const db = new DatabaseSync(c.dbPath);
+	t.after(() => db.close());
+	const last = db.prepare("SELECT payload FROM events ORDER BY seq DESC LIMIT 1").get();
+	assert.deepEqual(JSON.parse(last.payload), {
+		project: "test",
+		items: ["a", "b"],
+		notes: [
+			{ item: "a", title: "Трекер Umami", note: "Считаем визиты." },
+			{ item: "b", title: "Цвет статуса" },
+		],
+	});
+});
+
+test("record_release: notes с неизвестным item или пустым title — отказ", async (t) => {
+	const c = startClient(t);
+	await reg(c, "test");
+	const unknown = await c.tool("record_release", {
+		project: "test",
+		items: ["a"],
+		notes: [{ item: "zz", title: "X" }],
+	});
+	assert.equal(unknown.ok, false);
+	assert.match(unknown.error, /notes\[0\]\.item «zz» нет в items/);
+	const empty = await c.tool("record_release", {
+		project: "test",
+		items: ["a"],
+		notes: [{ item: "a", title: "  " }],
+	});
+	assert.equal(empty.ok, false);
+	assert.match(empty.error, /notes\[0\]\.title пуст/);
+});
+
 test("record_release: пустые items — отказ", async (t) => {
 	const c = startClient(t);
 	await reg(c, "test");
