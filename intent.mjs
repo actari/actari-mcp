@@ -298,6 +298,20 @@ export function formatTakeContext({ alreadyTaken, context }, projects) {
 	].join("\n");
 }
 
+// Причины облака, когда задачу или её фичу человек удалил (спека delete-features-tasks §6).
+const DELETED_REASONS = {
+	task_deleted: "задача удалена",
+	feature_deleted: "фича удалена",
+};
+
+export function isDeletedReason(reason) {
+	return Object.hasOwn(DELETED_REASONS, reason);
+}
+
+export function deletedReasonText(reason) {
+	return DELETED_REASONS[reason] ?? String(reason);
+}
+
 export function formatTakeRejection(taskId, body) {
 	const name = body?.intent?.title ? `«${body.intent.title}»` : taskId;
 	switch (body?.reason) {
@@ -309,6 +323,9 @@ export function formatTakeRejection(taskId, body) {
 			return `не взято: намерение ${name} ${body.override === "DONE_MANUAL" ? "закрыто вручную" : "отменено"} — ${byLine(body)}`;
 		case "feature_not_in_progress":
 			return `не взято: фича намерения ${name} не в работе (статус ${body.featureStatus})`;
+		case "task_deleted":
+		case "feature_deleted":
+			return `не взято: ${deletedReasonText(body.reason)} — намерение ${name} больше недоступно`;
 		default:
 			return `не взято: намерение ${name} — ${body?.reason ?? "облако отказало"}`;
 	}
@@ -329,9 +346,17 @@ export function formatReleaseRejection(taskId, result) {
 			return `не отпущено: намерение ${taskId} уже в инбоксе`;
 		case "conflict":
 			return `не отпущено: намерение ${taskId} облако не успело применить (одновременное изменение) — повтори`;
+		case "task_deleted":
+		case "feature_deleted":
+			return `не отпущено: ${deletedReasonText(reason)} — намерение ${taskId} больше недоступно`;
 		default:
 			return `не отпущено: ${reason ?? "облако отказало"}`;
 	}
+}
+
+// intent_status по удалённому намерению: облако ответило отказом с причиной, состояния нет.
+export function formatIntentDeleted(intentTaskId, reason) {
+	return `намерение ${intentTaskId}: ${deletedReasonText(reason)} — состояние недоступно, брать и списывать время нельзя`;
 }
 
 export function formatIntentStatus(view, { seen = null, cachedAt = null } = {}) {
@@ -465,6 +490,9 @@ export async function fetchIntent({ target, intentTaskId, timeoutMs = INTENT_TIM
 	}
 	const body = await readJson(res);
 	if (res.ok && body && typeof body.id === "string") return { kind: "ok", view: body };
+	if (res.status === 409 && isDeletedReason(body?.reason)) {
+		return { kind: "deleted", reason: body.reason, view: body.intent ?? null };
+	}
 	if (res.status === 404) return notFoundKind(body);
 	if (res.status === 403) return { kind: "forbidden" };
 	return { kind: "unavailable", error: `HTTP ${res.status}` };
@@ -539,7 +567,8 @@ export async function postIntentPublish({ target, body, timeoutMs = INTENT_TIMEO
 
 // log_time (спека time-tracking Р11–Р12): списание времени в облаке. 404 с
 // текстом задачи — задачи нет в этой цели; любой другой 404 — старое облако
-// без маршрута. Локальная SQLite не участвует.
+// без маршрута; 409 с task_deleted / feature_deleted — задача или фича удалена.
+// Локальная SQLite не участвует.
 export async function postWorkLog({ target, body, timeoutMs = INTENT_TIMEOUT_MS }) {
 	let res;
 	try {
@@ -562,6 +591,9 @@ export async function postWorkLog({ target, body, timeoutMs = INTENT_TIMEOUT_MS 
 			: { kind: "unsupported" };
 	}
 	if (res.status === 403) return { kind: "forbidden" };
+	if (res.status === 409 && isDeletedReason(payload?.reason)) {
+		return { kind: "deleted", reason: payload.reason };
+	}
 	if (res.status === 400) {
 		return { kind: "invalid", error: typeof payload?.error === "string" ? payload.error : null };
 	}
@@ -605,6 +637,9 @@ export function formatPublishRejection({ project, slug }, body) {
 			return `ключ ${project}/${slug} уже занят другим намерением ${intent} — привязка не сделана`;
 		case "closed_manually":
 			return `карточку ${intent} закрыли вручную в облаке — новую не создаю`;
+		case "task_deleted":
+		case "feature_deleted":
+			return `${deletedReasonText(body.reason)}: намерение ${intent} в облаке удалено — публикация не сделана`;
 		default:
 			return `облако отказало: ${body?.reason ?? "без причины"}`;
 	}

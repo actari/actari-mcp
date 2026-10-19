@@ -50,10 +50,12 @@ import {
 	INTENT_TIMEOUT_MS,
 	UNSUPPORTED_NOTICE,
 	decideIntentGate,
+	deletedReasonText,
 	describeIntentChange,
 	fetchIntent,
 	fetchIntentChanges,
 	formatInboxItem,
+	formatIntentDeleted,
 	formatIntentStatus,
 	formatNotices,
 	formatReleaseRejection,
@@ -364,6 +366,8 @@ async function lookupIntent(intentTaskId) {
 	for (const target of targets) {
 		const result = await fetchIntent({ target, intentTaskId, timeoutMs: INTENT_TIMEOUT });
 		if (result.kind === "ok") return { view: result.view, cached, target };
+		// Задача или фича удалена: состояния нет, причина — в deleted (кэш не трогаем).
+		if (result.kind === "deleted") return { view: null, cached, deleted: result.reason };
 		if (result.kind === "unsupported") {
 			markIntentsUnsupported();
 			return { view: null, cached, unsupported: true };
@@ -380,6 +384,12 @@ async function checkIntentGate(act, intentTaskId, localCreatedAt = null, extra =
 	if (!intentTaskId) return null;
 	const found = await lookupIntent(intentTaskId);
 	if (found.unsupported || found.offline) return null;
+	if (found.deleted) {
+		pushNotice(
+			`намерение ${intentTaskId}: ${deletedReasonText(found.deleted)} в облаке — проверка состояния пропущена`,
+		);
+		return null;
+	}
 	if (found.missing) {
 		pushNotice(
 			`намерение ${intentTaskId} не найдено в облаке (удалено или чужое) — проверка состояния пропущена`,
@@ -469,7 +479,9 @@ async function summarizeIntent(intentTaskId) {
 				? "offline"
 				: found.missing
 					? "missing"
-					: "unavailable";
+					: found.deleted
+						? found.deleted
+						: "unavailable";
 		return { intent_task_id: intentTaskId, state: null, source };
 	}
 	if (found.target) {
@@ -1709,6 +1721,7 @@ const TOOLS = [
 			if (found.unsupported) return "облако не поддерживает состояние намерений — обнови облако";
 			if (found.offline) return "синк не настроен — состояние намерения узнать не у кого (connect)";
 			if (found.missing) return `намерение ${intentTaskId} не найдено в облаке`;
+			if (found.deleted) return formatIntentDeleted(intentTaskId, found.deleted);
 			if (!found.view) {
 				return `состояние намерения ${intentTaskId} не проверено: облако недоступно (${found.unavailable}), кэша нет`;
 			}
@@ -1938,6 +1951,11 @@ const TOOLS = [
 				if (result.kind === "ok") return formatWorkLogResult(result.body);
 				if (result.kind === "invalid") {
 					throw new Error(result.error ?? "облако отклонило списание: неверный запрос");
+				}
+				if (result.kind === "deleted") {
+					throw new Error(
+						`${deletedReasonText(result.reason)}: ${cloudTaskId} в облаке удалена — время не списано`,
+					);
 				}
 				if (result.kind === "forbidden") forbidden = true;
 				else if (result.kind === "unsupported") unsupported = true;

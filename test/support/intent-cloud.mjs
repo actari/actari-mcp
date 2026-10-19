@@ -148,6 +148,8 @@ export function startIntentCloud(
 		published: new Map(),
 		workLogs: [],
 		workLogOverride: null,
+		// id намерения -> "task_deleted" | "feature_deleted": задачу или фичу удалил человек.
+		deleted: new Map(),
 	};
 
 	// Реальные часы плюс монотонность: если Date.now() не вырос, +1 мс.
@@ -206,6 +208,10 @@ export function startIntentCloud(
 
 	const helpers = {
 		addIntent,
+		markDeleted(id, reason = "task_deleted") {
+			get(id);
+			state.deleted.set(id, reason);
+		},
 		cancel(id, note = "фича снята") {
 			const view = get(id);
 			view.override = { kind: "CANCELLED", note, by: LEAD, at: tick() };
@@ -329,6 +335,9 @@ export function startIntentCloud(
 				state.takes.push(body.taskId);
 				const view = state.views.get(body.taskId);
 				if (!view) return send(404, { error: "Intent not found" });
+				if (state.deleted.has(body.taskId)) {
+					return send(409, { reason: state.deleted.get(body.taskId), intent: view });
+				}
 				if (view.override) {
 					return send(409, {
 						reason: "overridden",
@@ -383,6 +392,12 @@ export function startIntentCloud(
 					state.workLogOverride = null;
 					return send(over.status, { error: over.error });
 				}
+				if (state.deleted.has(body.taskId)) {
+					return send(409, {
+						error: "Задача удалена",
+						reason: state.deleted.get(body.taskId),
+					});
+				}
 				const task = workLogTasks[body.taskId];
 				if (!task) return send(404, { error: "Задача не найдена" });
 				task.totalMinutes = (task.totalMinutes ?? 0) + body.minutes;
@@ -417,6 +432,9 @@ export function startIntentCloud(
 					if (body.intentTaskId) {
 						const view = state.views.get(body.intentTaskId);
 						if (!view) return send(404, { error: "Intent not found" });
+						if (state.deleted.has(body.intentTaskId)) {
+							return send(409, { reason: state.deleted.get(body.intentTaskId), intent: view });
+						}
 						const had = state.published.get(key)?.id === view.id;
 						state.published.set(key, { id: view.id, text: body.text });
 						return reply(had ? "unchanged" : "bound", view);
@@ -455,9 +473,13 @@ export function startIntentCloud(
 				if (!view) return send(404, { error: "Intent not found" });
 				if (!isRelease) {
 					state.intentGets += 1;
+					if (state.deleted.has(id))
+						return send(409, { reason: state.deleted.get(id), intent: view });
 					return send(200, view);
 				}
 				state.releases.push({ id, note: body.note ?? null });
+				if (state.deleted.has(id))
+					return send(409, { reason: state.deleted.get(id), intent: view });
 				if (state.releaseOverride) {
 					const over = state.releaseOverride;
 					state.releaseOverride = null;
