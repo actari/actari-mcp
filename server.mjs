@@ -59,14 +59,18 @@ import {
 	formatIntentStatus,
 	formatNotices,
 	formatReleaseRejection,
+	formatAnswerResult,
+	formatFeatureQuestions,
 	formatPublishRejection,
 	formatPublishResult,
+	getFeatureQuestions,
 	formatSyncWarning,
 	formatTakeContext,
 	formatTakeRejection,
 	formatWorkLogResult,
 	formatWhen,
 	parseJournalAt,
+	postFeatureQuestionAnswer,
 	postIntentPublish,
 	postIntentRelease,
 	postWorkLog,
@@ -343,6 +347,41 @@ function orderedTargets(preferredUrl) {
 		...targets.filter((target) => target.url === preferredUrl),
 		...targets.filter((target) => target.url !== preferredUrl),
 	];
+}
+
+// Проект с cloud_workspace_id и первая цель синка — для вопросов фичи
+// (спека feature-questions §6: workspaceId проекта, первая цель).
+function featureQuestionsTarget(project) {
+	const row = requireProject(project);
+	if (!row.cloud_workspace_id) {
+		throw new Error(
+			`проект ${project} не привязан к облаку (register_project с cloud_workspace_id или sync_scope) — локальный флоу продолжается`,
+		);
+	}
+	const [target] = orderedTargets(null);
+	if (!target) {
+		throw new Error("облако не настроено (нет sync.json / token) — локальный флоу продолжается");
+	}
+	return { target, row };
+}
+
+function featureQuestionsFailure(tool, row, result) {
+	switch (result.kind) {
+		case "rejected":
+			return result.reason ?? "облако отклонило запрос";
+		case "not_found":
+			return result.reason ?? "фича не найдена в облаке";
+		case "forbidden":
+			return `нет доступа к пространству ${row.cloud_workspace_id} (403)`;
+		case "unsupported":
+			return `облако не поддерживает ${tool} (старая версия сервера)`;
+		case "invalid": {
+			const first = result.issues[0];
+			return `облако отклонило ${tool}: ${first ? `${(first.path ?? []).join(".")}: ${first.message}` : "неверный запрос"}`;
+		}
+		default:
+			return `облако недоступно: ${result.error}; повторите ${tool} позже`;
+	}
 }
 
 // intent_task_id журнальной задачи — из последнего TaskDrafted (redraft может сменить).
@@ -1892,6 +1931,67 @@ const TOOLS = [
 			throw new Error(
 				`нет доступа к пространству ${row.cloud_workspace_id} ни в одной цели синка (403)`,
 			);
+		},
+	},
+	{
+		name: "feature_questions",
+		description:
+			"Вопросы AI-продакта по фиче из облака: по каждому id, статус (открыт / отвечен / снят), текст, " +
+			"ссылка на вкладку фичи и ветка ответов «автор (источник): текст». Фича задаётся ключом " +
+			"(project, slug) — тем же, что у publish_intent. Только чтение. Ответить — answer_question.",
+		inputSchema: {
+			type: "object",
+			properties: {
+				project: { type: "string", description: "Проект журнала (с cloud_workspace_id)" },
+				slug: { type: "string", description: "Slug фичи (ключ вместе с project)" },
+			},
+			required: ["project", "slug"],
+		},
+		handler: async ({ project, slug }) => {
+			const { target, row } = featureQuestionsTarget(project);
+			const result = await getFeatureQuestions({
+				target,
+				workspaceId: row.cloud_workspace_id,
+				project,
+				slug,
+				timeoutMs: INBOX_TIMEOUT,
+			});
+			if (result.kind === "ok") return formatFeatureQuestions({ project, slug }, result.body);
+			throw new Error(featureQuestionsFailure("feature_questions", row, result));
+		},
+	},
+	{
+		name: "answer_question",
+		description:
+			"Ответить на вопрос AI-продакта по фиче: текст попадает в ветку вопроса, вопрос становится " +
+			"«отвечен». Ответ подписывается владельцем токена с пометкой «через MCP». Фича — ключ " +
+			"(project, slug), question_id — из feature_questions. Снятый вопрос или вопрос другой фичи " +
+			"облако отклоняет с причиной.",
+		inputSchema: {
+			type: "object",
+			properties: {
+				project: { type: "string", description: "Проект журнала (с cloud_workspace_id)" },
+				slug: { type: "string", description: "Slug фичи (ключ вместе с project)" },
+				question_id: { type: "string", description: "Id вопроса из feature_questions" },
+				text: { type: "string", description: "Текст ответа" },
+			},
+			required: ["project", "slug", "question_id", "text"],
+		},
+		handler: async ({ project, slug, question_id, text }) => {
+			const { target, row } = featureQuestionsTarget(project);
+			const result = await postFeatureQuestionAnswer({
+				target,
+				body: {
+					workspaceId: row.cloud_workspace_id,
+					project,
+					slug,
+					questionId: question_id,
+					text,
+				},
+				timeoutMs: INBOX_TIMEOUT,
+			});
+			if (result.kind === "ok") return formatAnswerResult(question_id, result.body.question);
+			throw new Error(featureQuestionsFailure("answer_question", row, result));
 		},
 	},
 	{

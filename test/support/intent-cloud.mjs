@@ -130,6 +130,13 @@ export function startIntentCloud(
 		changesLimit = 100,
 		// задачи облака, на которые принимаются списания: id -> { title, totalMinutes }
 		workLogTasks = {},
+		// ответ GET /api/mcp/read/feature-questions; null — фичи нет (404)
+		featureQuestions = null,
+		// принудительный ответ GET feature-questions: { status, body } (403, 503 и т. п.)
+		questionsOverride = null,
+		// ответ POST /api/mcp/feature-questions/answer: статус и тело; по умолчанию 200 {question}
+		answerStatus = 200,
+		answerBody = null,
 	} = {},
 ) {
 	const state = {
@@ -148,6 +155,9 @@ export function startIntentCloud(
 		published: new Map(),
 		workLogs: [],
 		workLogOverride: null,
+		// query-параметры GET feature-questions и тела POST answer — что реально ушло в облако
+		questionQueries: [],
+		answers: [],
 		// id намерения -> "task_deleted" | "feature_deleted": задачу или фичу удалил человек.
 		deleted: new Map(),
 	};
@@ -408,6 +418,44 @@ export function startIntentCloud(
 					taskTitle: task.title,
 					totalMinutes: task.totalMinutes,
 				});
+			}
+
+			if (path.endsWith("/api/mcp/read/feature-questions")) {
+				if (req.method !== "GET") return send(404, { error: "Unknown endpoint" });
+				state.questionQueries.push(Object.fromEntries(url.searchParams));
+				if (questionsOverride) return send(questionsOverride.status, questionsOverride.body ?? {});
+				if (!featureQuestions) {
+					return send(404, {
+						error: "Feature not found",
+						reason: `Фича ${url.searchParams.get("project")}/${url.searchParams.get("slug")} не найдена`,
+					});
+				}
+				return send(200, featureQuestions);
+			}
+
+			if (path.endsWith("/api/mcp/feature-questions/answer")) {
+				if (req.method !== "POST") return send(404, { error: "Unknown endpoint" });
+				state.answers.push(body);
+				if (answerStatus !== 200) return send(answerStatus, answerBody ?? {});
+				return send(
+					200,
+					answerBody ?? {
+						question: {
+							id: body.questionId,
+							status: "ANSWERED",
+							text: "Вопрос",
+							url: `https://cloud.test/features/f-1#question-${body.questionId}`,
+							thread: [
+								{
+									author: ME.name,
+									source: "MCP",
+									body: body.text,
+									createdAt: "2026-10-20T12:00:00.000Z",
+								},
+							],
+						},
+					},
+				);
 			}
 
 			if (path.includes("/api/mcp/intents")) {

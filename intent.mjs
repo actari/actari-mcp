@@ -8,6 +8,8 @@ import { normalizeBaseUrl } from "./sync.mjs";
 
 export const INTENTS_PATH = "/api/mcp/intents";
 export const WORK_LOGS_PATH = "/api/mcp/work-logs";
+export const FEATURE_QUESTIONS_PATH = "/api/mcp/read/feature-questions";
+export const FEATURE_QUESTION_ANSWER_PATH = "/api/mcp/feature-questions/answer";
 export const INTENT_TIMEOUT_MS = 2000;
 export const INTENT_POLL_MS = 60_000;
 // Совпадает с CHANGE_LIMIT облака (packages/core listChanges).
@@ -455,6 +457,18 @@ export function workLogsUrlFromBase(base) {
 	return `${normalizeBaseUrl(base)}${WORK_LOGS_PATH}`;
 }
 
+export function featureQuestionsUrlFromBase(base, { workspaceId, project, slug }) {
+	const url = new URL(`${normalizeBaseUrl(base)}${FEATURE_QUESTIONS_PATH}`);
+	url.searchParams.set("workspaceId", workspaceId);
+	url.searchParams.set("project", project);
+	url.searchParams.set("slug", slug);
+	return url.toString();
+}
+
+export function featureQuestionAnswerUrlFromBase(base) {
+	return `${normalizeBaseUrl(base)}${FEATURE_QUESTION_ANSWER_PATH}`;
+}
+
 // ============ клиент API намерений ============
 
 function authHeaders(target, extra = {}) {
@@ -563,6 +577,106 @@ export async function postIntentPublish({ target, body, timeoutMs = INTENT_TIMEO
 	if (res.status === 400)
 		return { kind: "invalid", issues: Array.isArray(payload?.issues) ? payload.issues : [] };
 	return { kind: "unavailable", error: `HTTP ${res.status}` };
+}
+
+// Вопросы AI-продакта по фиче (спека 2026-10-20 feature-questions §4). 404 с
+// error «Feature not found» — фичи с ключом (project, slug) нет; любой другой
+// 404 — старое облако без маршрута. 409 — отказ с reason (вопрос снят / чужой).
+const FEATURE_NOT_FOUND = "Feature not found";
+
+function classifyFeatureQuestionsResponse(res, payload, isOk) {
+	if (res.ok && isOk(payload)) return { kind: "ok", body: payload };
+	if (res.status === 409) return { kind: "rejected", reason: payload?.reason ?? null };
+	if (res.status === 404) {
+		return payload?.error === FEATURE_NOT_FOUND
+			? { kind: "not_found", reason: typeof payload?.reason === "string" ? payload.reason : null }
+			: { kind: "unsupported" };
+	}
+	if (res.status === 403) return { kind: "forbidden" };
+	if (res.status === 400)
+		return { kind: "invalid", issues: Array.isArray(payload?.issues) ? payload.issues : [] };
+	return { kind: "unavailable", error: `HTTP ${res.status}` };
+}
+
+export async function getFeatureQuestions({
+	target,
+	workspaceId,
+	project,
+	slug,
+	timeoutMs = INTENT_TIMEOUT_MS,
+}) {
+	let res;
+	try {
+		res = await fetch(featureQuestionsUrlFromBase(target.url, { workspaceId, project, slug }), {
+			headers: authHeaders(target),
+			signal: AbortSignal.timeout(timeoutMs),
+		});
+	} catch (err) {
+		return { kind: "unavailable", error: networkError(err) };
+	}
+	const payload = await readJson(res);
+	return classifyFeatureQuestionsResponse(res, payload, (body) => Array.isArray(body?.questions));
+}
+
+export async function postFeatureQuestionAnswer({ target, body, timeoutMs = INTENT_TIMEOUT_MS }) {
+	let res;
+	try {
+		res = await fetch(featureQuestionAnswerUrlFromBase(target.url), {
+			method: "POST",
+			headers: authHeaders(target, { "content-type": "application/json" }),
+			body: JSON.stringify(body),
+			signal: AbortSignal.timeout(timeoutMs),
+		});
+	} catch (err) {
+		return { kind: "unavailable", error: networkError(err) };
+	}
+	const payload = await readJson(res);
+	return classifyFeatureQuestionsResponse(
+		res,
+		payload,
+		(data) => typeof data?.question === "object" && data.question !== null,
+	);
+}
+
+const QUESTION_STATUS_RU = { OPEN: "открыт", ANSWERED: "отвечен", WITHDRAWN: "снят" };
+
+export function formatQuestionStatus(status) {
+	return QUESTION_STATUS_RU[status] ?? String(status ?? "?").toLowerCase();
+}
+
+const SOURCE_NOTE_RU = { MCP: "через MCP", TELEGRAM: "через Telegram" };
+
+// Строка ветки: «автор (через MCP): текст». Уточнение AI-продакта подписано
+// «AI-продакт» (его автор в данных — пользователь, запустивший оценку).
+export function formatThreadMessage(message) {
+	const body = String(message?.body ?? "");
+	if (message?.source === "AI_PRODUCT") return `AI-продакт: ${body}`;
+	const author = message?.author || "?";
+	const note = SOURCE_NOTE_RU[message?.source];
+	return note ? `${author} (${note}): ${body}` : `${author}: ${body}`;
+}
+
+export function formatFeatureQuestions({ project, slug }, body) {
+	const title = body?.feature?.title ? ` «${body.feature.title}»` : "";
+	const link = body?.feature?.url ? ` — ${body.feature.url}` : "";
+	const head = `Фича ${project}/${slug}${title}${link}`;
+	const questions = body?.questions ?? [];
+	if (questions.length === 0) return `${head}\nУ фичи нет вопросов AI-продакта`;
+	const blocks = questions.map((q) => {
+		const lines = [`Вопрос ${q.id} — ${formatQuestionStatus(q.status)}`, q.text];
+		if (q.url) lines.push(`ссылка: ${q.url}`);
+		const thread = q.thread ?? [];
+		if (thread.length > 0) {
+			lines.push("ветка:");
+			for (const message of thread) lines.push(`- ${formatThreadMessage(message)}`);
+		}
+		return lines.join("\n");
+	});
+	return `${head}\nВопросов: ${questions.length}\n\n${blocks.join("\n\n")}`;
+}
+
+export function formatAnswerResult(questionId, question) {
+	return `Ответ записан в ветку вопроса ${question?.id ?? questionId}, статус: ${formatQuestionStatus(question?.status ?? "ANSWERED")}`;
 }
 
 // log_time (спека time-tracking Р11–Р12): списание времени в облаке. 404 с

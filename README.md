@@ -142,6 +142,13 @@ shows the intent; `release_intent` gives a taken intent back.
 feature and its intent keyed by `(project, slug)`; a card closed by a human
 is never recreated.
 
+`feature_questions { project, slug }` lists the AI product owner's questions
+on a feature (id, status, text, link and the reply thread); `answer_question
+{ project, slug, question_id, text }` writes an answer into the question's
+thread, signed with the token owner's name and marked "via MCP". The feature is
+addressed by the same `(project, slug)` key as `publish_intent`, in the
+project's `cloud_workspace_id`.
+
 `log_time { task_id, hours, date?, note? }` logs time on a cloud task as the
 token's owner, exactly like "Log time" in the task card (minimum 15 minutes,
 `hours: 1.5` = 1 h 30 min, `date` defaults to today). `task_id` is a cloud
