@@ -8,8 +8,8 @@
 	"plugins": [
 		{
 			"name": "actari",
-			"version": "0.20.0",
-			"description": "Task journal (MCP over SQLite) plus the protocol skill. Rules come from a per-project policy: local policy.json or the cloud workspace.",
+			"version": "0.21.0",
+			"description": "Task journal (MCP over SQLite) plus two skills: the protocol and the feature cycle (actari:feature). Rules come from a per-project policy: local policy.json or the cloud workspace.",
 			"source": "./",
 			"author": {
 				"name": "Aleksey Nikitin",

@@ -38,6 +38,10 @@ Do these in order the first time you work in a repository:
    if the person gave you an address and a token ("connect actari"), call
    `connect { token }` first.
 
+The default way to run a feature end to end is the `feature` skill
+(`actari:feature` in Claude Code): intent, 1-3 tasks, acceptance by someone
+other than the author, release record.
+
 If the journal answers that a project is not registered, go back to step 1.
 If the cloud shows nothing while the person belongs to several workspaces,
 bind the project with `sync_scope`.

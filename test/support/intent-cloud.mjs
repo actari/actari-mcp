@@ -68,8 +68,8 @@ export async function waitFor(predicate, timeoutMs = 3000) {
 	return false;
 }
 
-export function startMcp(t, env) {
-	const child = spawn(process.execPath, [SERVER], { env, stdio: ["pipe", "pipe", "pipe"] });
+export function startMcp(t, env, server = SERVER) {
+	const child = spawn(process.execPath, [server], { env, stdio: ["pipe", "pipe", "pipe"] });
 	t.after(() => child.kill());
 	let stderr = "";
 	child.stderr.setEncoding("utf8");

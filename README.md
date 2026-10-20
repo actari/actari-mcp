@@ -1,7 +1,7 @@
 # actari
 
 [![npm](https://img.shields.io/npm/v/actari-mcp)](https://www.npmjs.com/package/actari-mcp)
-[![skills.sh](https://img.shields.io/badge/skills.sh-1_skill-8A2BE2)](https://skills.sh/actari/actari-mcp)
+[![skills.sh](https://img.shields.io/badge/skills.sh-2_skills-8A2BE2)](https://skills.sh/actari/actari-mcp)
 <!-- TODO: когда каталог проиндексирует установки, вернуть живой счётчик: https://skills.sh/b/actari/actari-mcp -->
 
 **A task journal for AI agents. The rules are yours.**
@@ -25,10 +25,12 @@ item) and the cloud builds the Telegram release message from them.
 
 **What each part is for.** The **MCP server** (`actari-mcp`) is the journal on
 your machine: the agent keeps tasks, reports and artifacts in it with tools,
-and it pushes them to the cloud. The **skill** (`actari`) teaches the agent
-the journal protocol: register the project first, run a task from a human
-through the journal, publish a feature from a discussion with
-`publish_intent`, take work from the cloud with `inbox` / `take`. The
+and it pushes them to the cloud. The **skills** teach the agent: `actari`
+the journal protocol and `feature` the working order for one feature (see
+[First feature in 10 minutes](#first-feature-in-10-minutes)). The protocol:
+register the project first, run a task from a human through the journal,
+publish a feature from a discussion with `publish_intent`, take work from
+the cloud with `inbox` / `take`. The
 **policy** holds the rules of drafting, reporting and accepting; it is set per
 project (`set_policy`) or in the cloud workspace and read with `get_policy`.
 The cloud adds the board, acceptance and the team on top of the journal.
@@ -65,16 +67,10 @@ npx skills add actari/actari-mcp
 "Register this project in actari". Without a registered project the journal
 refuses every task.
 
-**5. Run the first task.** Either from the cloud — create a feature, add
-tasks, press "Take into work", then tell the agent "Take the task from the
-actari inbox" (`inbox` → `take`) — or from the terminal: "Do X and track it
-through the actari journal" (`draft_task` → `delegate` → `submit_report` →
-`accept`).
-
-**6. See it in the cloud.** The task shows up in the workspace "Journal" and
-on the feature board. If it does not: the project is not registered, Node.js
-is older than 22.5, the token is read-only, or you belong to several
-workspaces and need `sync_scope`.
+**5. Run the first feature.** Follow
+[First feature in 10 minutes](#first-feature-in-10-minutes): one sentence to
+the agent, one "ok", and you watch the feature go from the board to
+"accepted" and "shipped".
 
 Optionally, pin the journal at the project level — copy this into your
 `AGENTS.md` / `CLAUDE.md`:
@@ -84,6 +80,56 @@ Delegated work is recorded in the `actari` MCP journal: `draft_task` →
 `delegate` → `submit_report` → `accept`. The rules for each step come from
 `get_policy { project }` and are echoed in the tool descriptions.
 ```
+
+## First feature in 10 minutes
+
+Prerequisites: steps 1-4 of [Quick start](#quick-start) (cloud workspace and
+token, plugin installed, cloud connected, project registered). The `feature`
+skill drives everything below; in Claude Code it is `actari:feature`. Without
+the cloud the same cycle runs in the local journal.
+
+1. **You say:** "Please do it through actari: add CSV export of the report"
+   (or in Russian, "Сделай через actari: …"; the agent answers in your
+   language). **The agent:** registers the project if it is new, reads its
+   policy, and shows you a short intent: what it will do, what it will not,
+   and 3-5 criteria for "done". **You:** answer "ok" or correct it. This is
+   the only stop before acceptance.
+2. **The agent:** records the intent (`intent: <slug>` in the journal),
+   publishes it with `publish_intent`, and cuts the work into 1-3 tasks.
+   **In the cloud:** the feature appears on the board with its intent and
+   criteria.
+3. **The agent:** drafts, delegates and does each task, then submits a
+   report with the commands it ran and their output. **In the cloud:** each
+   task moves *in progress* then *reported*.
+4. **The agent:** hands every task to a separate reviewer that has none of
+   its context. The reviewer reads the report and the diff, runs the checks
+   itself and returns `verdict: accept | rework | failed` with evidence; the
+   verdict is recorded as an `acceptance: <task>` artifact. **In the cloud:**
+   *reported* then *accepted* (or back to rework). In a client without
+   subagents the agent shows you the report and evidence and accepts only
+   after you say ok. The agent never accepts its own work.
+5. **The agent:** writes a summary: what is done, what proved it, what is
+   left, where to look. **You:** see the accepted tasks on the board.
+6. **You ship it yourself, then say:** "Shipped." **The agent:** records the
+   release with `record_release` and syncs. **In the cloud:** the release
+   appears, and the notification reaches Telegram.
+
+**Take it from actari.** Created the feature in the cloud instead? Add tasks,
+press "Take into work", and tell the agent: "Take it from actari." It reads
+the `inbox`, takes the intent with `take`, and runs steps 3-6 on it without
+writing its own intent.
+
+### Nothing showed up?
+
+- The project is not registered: tell the agent "Register this project in
+  actari". Without it the journal refuses every task.
+- Node.js is older than 22.5: the server does not start. Check
+  `node --version`.
+- The token is read-only: `connect` and `sync` need a write token. Issue a new
+  one on the MCP tokens page.
+- You belong to several workspaces: bind the project with `sync_scope`.
+- No cloud connected: the cycle still works in the local journal. Look there
+  with `list_tasks`; nothing is pushed until you `connect`.
 
 ## Install
 
@@ -304,13 +350,20 @@ Built-in presets (`Lenient`, `Evidence first`, `Strict`) are published in
 the cloud as public policies — attach or fork one there, or export its JSON
 and use it locally with `set_policy`.
 
-## Skill
+## Skills
 
-The package ships one skill, `actari` — the journal protocol and the
-pointer to `get_policy`. Install via the Claude Code plugin, or:
+The package ships two skills:
+
+- `actari` - the journal protocol and the pointer to `get_policy`.
+- `feature` - the working order for one feature: intent with one
+  confirmation, 1-3 tasks, acceptance by someone other than the author,
+  summary, release record. In Claude Code it is `actari:feature`.
+
+Install via the Claude Code plugin (both skills come with it), or:
 
 ```bash
 npx skills add actari/actari-mcp --skill actari
+npx skills add actari/actari-mcp --skill feature
 ```
 
 ## License
