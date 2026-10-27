@@ -320,6 +320,50 @@ test("перенос: старая схема без Released в CHECK пере�
 	assert.equal(after.events, before.events + 1);
 });
 
+test("перенос: старая схема без UsageRecorded в CHECK переигрывается", async (t) => {
+	const dir = tmpDir();
+	const dbPath = join(dir, "journal.db");
+
+	// 1) База по схеме без 'UsageRecorded' в CHECK — имитация версии 0.21.
+	const legacySchema = readFileSync(SCHEMA, "utf8").replace(/^ +'UsageRecorded', .*\n/m, "");
+	assert.ok(!legacySchema.includes("'UsageRecorded',"), "строка UsageRecorded вырезана из CHECK");
+	const legacy = new DatabaseSync(dbPath);
+	legacy.exec(legacySchema);
+	const insertEvent = legacy.prepare("INSERT INTO events(task_id, type, payload) VALUES (?, ?, ?)");
+	insertEvent.run(
+		"_general",
+		"ProjectRegistered",
+		JSON.stringify({ name: "old", root_path: "/tmp/old" }),
+	);
+	insertEvent.run(
+		"old/t1",
+		"TaskDrafted",
+		JSON.stringify({ project: "old", title: "т1", task_text: "x" }),
+	);
+	insertEvent.run("old/t1", "Delegated", JSON.stringify({ executor: "subagent" }));
+	const before = legacy.prepare("SELECT count(*) AS n FROM events").get().n;
+	legacy.close();
+
+	// 2) Новый старт — детектор по тексту DDL events замечает отсутствие UsageRecorded
+	const c = startClient(t, { dbPath });
+	const list = await c.tool("list_tasks", { project: "old" });
+	assert.ok(list.ok, list.error);
+	assert.match(c.getStderr(), new RegExp(`перенесено ${before} событий`));
+
+	// после переноса CHECK принимает UsageRecorded, и запись проходит
+	const usage = await c.tool("log_usage", {
+		project: "old",
+		task_id: "old/t1",
+		role: "executor",
+		source: "subagent",
+		total_tokens: 42,
+	});
+	assert.ok(usage.ok, usage.error);
+	const got = await c.tool("get_task", { task_id: "old/t1" });
+	assert.equal(got.data.usage.total_tokens, 42);
+	await c.stop();
+});
+
 test("перенос: база новой схемы не трогается", async (t) => {
 	const dir = tmpDir();
 	const dbPath = join(dir, "journal.db");

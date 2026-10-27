@@ -203,6 +203,27 @@ the cloud** — never to the local journal — and fails with a clear message wh
 no cloud is connected. `submit_report` accepts an optional `duration_minutes`
 (integer, 1–1440); when given, the cloud uses it as the AI time of the task.
 
+`log_usage { project, task_id, role, source, session?, usage_file? }` records the AI
+tokens a task cost in the local journal (`UsageRecorded`; status is not
+changed, any status except DRAFT). `role` is `executor` or `acceptance`;
+`source` is `subagent` (a Claude Code subagent or forked skill) or `headless`
+(an external executor). Tokens are found by the server, not copied by the
+agent. With `session: { client, id }` it looks the session up by the id the
+client returned: `claude-code` — the `agentId` of a subagent (transcript in
+`<CLAUDE_CONFIG_DIR|~/.claude>/projects/…/subagents/agent-<id>.jsonl`) or the
+`session_id` of `claude -p`; `opencode` — the `ses_…` id from the `task` tool
+result (read-only from `<XDG_DATA_HOME|~/.local/share>/opencode/opencode.db`);
+`codex` — a `thread_id` or the `task_name` that `spawn_agent` returned
+(rollouts in `<CODEX_HOME|~/.codex>/sessions`). With `usage_file` it counts a
+file: a subagent transcript, the output of `claude -p --output-format json`,
+`opencode run --format json` or `codex exec --json`. One source per call —
+`session`, `usage_file` or numbers (`total_tokens`, or the input/output/cache
+breakdown, only the sum for the whole work, never the context size of the last
+turn). The client files are internal formats, not a promised API: if one
+changes, the call is refused with a reason and nothing is recorded. The
+`feature` skill calls it after the executor and after the acceptor; the cloud
+shows the numbers next to the AI time of the task.
+
 ### Self-hosted (on-premise)
 
 Pass the **base URL** of your instance; endpoint paths are derived by the server,

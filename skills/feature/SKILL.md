@@ -84,12 +84,36 @@ checked on its own; no plan file. For each task:
    `intent_task_id` when working locally). `task_text` holds: context, the
    criteria that apply to this task word for word, the order of work, what
    not to touch, and the report format you will use.
-3. `delegate { task_id, executor }` — `subagent` when a separate agent does
-   the work, `inline` when you do it yourself.
+3. `delegate { task_id, executor: "subagent" }` — with subagents available a
+   separate agent does the work (the default); `inline` only when you have
+   none and do it yourself.
 4. Do the work. Run the checks yourself as you go.
 5. `submit_report { task_id, report }` with proof, not a summary: the
    commands you ran and their output, the files you changed, and a
    "Findings" section for what you noticed and left alone.
+6. Record the tokens the work cost: `log_usage { project, task_id, role:
+   "executor", source: "subagent", session: { client, id } }`. Pass the id
+   the client gave you back and the server finds the tokens itself — you
+   never copy numbers. Claude Code: client "claude-code", id is the agentId
+   from the subagent's result. opencode: client "opencode", id is the
+   ses_… from `<task id="…">` in the task result. Codex: client "codex", id
+   is the task_name that spawn_agent returned (give each Codex subagent a
+   unique task name with the journal task id in it, the newest file with
+   that name wins) or a thread_id. Pass session alone: with numbers or
+   usage_file next to it the call is refused. An executor started headlessly
+   (`source: "headless"`): `claude -p --output-format json` — session
+   { client: "claude-code", id: session_id from its output }; `codex exec
+   --json` and `opencode run --format json` — usage_file is their output
+   saved to a file (usage_file also takes a Claude Code transcript path
+   when you have no id); text output has no numbers, so write nothing. A
+   number from the result goes in as total_tokens only for a client that
+   gives nothing but one sum for the whole work; Claude Code's
+   subagent_tokens is the context size of the last turn, never write it.
+   Any other client (Cursor and the rest): do not guess a client or a number,
+   write nothing and say "токены: клиент не отдал"; the work goes on.
+   Done `inline`: write nothing and say in the summary
+   "токены не записаны: работа шла в этом чате". If the server has no `log_usage`, skip the step
+   silently; if it refuses, say "токены: клиент не отдал".
 
 A decision costly to undo (data model, library, protocol, module boundary)
 is recorded on its own with `record_artifact { kind: "adr", task_id }`, in
@@ -120,6 +144,12 @@ findings: <what is wrong or doubtful, one per line>
 Record the verdict word for word:
 `record_artifact { project, kind: "note", task_id, title: "acceptance: <task_id>", body }`.
 
+Record the acceptor's tokens the same way: `log_usage { project, task_id,
+role: "acceptance", source: "subagent", session: { client, id } }` with the id
+of the acceptor subagent from step 6 (a forked skill returns no agentId: then
+usage_file with its transcript, the one that has the task id in its first
+line).
+
 Then act on it:
 
 - `accept` — if the task has an intent, call `intent_status` first; if a
@@ -136,6 +166,7 @@ Without subagents (other clients), show the person the report and the
 evidence and ask for their verdict. Call `accept` only after the human says
 ok, and record what they said with the same `acceptance: <task_id>` artifact.
 If they say no, `request_rework` with their reasons.
+No acceptor ran, so there is nothing to record with `role: "acceptance"`.
 
 Self-acceptance in any other form — accepting because your own run passed,
 or calling a subagent that shares your context a "reviewer" — is not
@@ -147,6 +178,8 @@ When every task is accepted, tell the person in a few lines:
 
 - **Done** — what now works, in terms of the criteria they confirmed.
 - **Checked by** — who gave the verdict and which commands proved it.
+- **Tokens** — what `log_usage` recorded per role, or the line from step 6
+  of section 4 when it recorded nothing.
 - **Left** — findings and doubts; each one is also a `draft_task` draft so
   it is not lost.
 - **Where to look** — the feature and its tasks on the cloud board, or "only

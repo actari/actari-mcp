@@ -1,0 +1,17 @@
+{
+	"type": "result",
+	"subtype": "success",
+	"is_error": false,
+	"result": "готово",
+	"total_cost_usd": 0.5,
+	"usage": {
+		"input_tokens": 100,
+		"output_tokens": 200,
+		"cache_read_input_tokens": 3000,
+		"cache_creation_input_tokens": 400
+	},
+	"modelUsage": {
+		"claude-sonnet-5": { "inputTokens": 100, "outputTokens": 200 },
+		"claude-haiku-5": { "inputTokens": 1, "outputTokens": 1 }
+	}
+}

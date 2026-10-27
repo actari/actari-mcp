@@ -114,6 +114,44 @@ test("скилл feature: frontmatter, шаги цикла, приёмка не 
 	}
 });
 
+test("скилл feature: токены AI через log_usage", () => {
+	const text = readFileSync(join(ROOT, "skills", "feature", "SKILL.md"), "utf8");
+	const tasks = section(text, "## 4. Tasks");
+	for (const needle of [
+		"log_usage",
+		'executor: "subagent"',
+		"usage_file",
+		"session",
+		"claude-code",
+		"opencode",
+		"codex",
+		"токены не записаны: работа шла в этом чате",
+		"токены: клиент не отдал",
+		"subagent_tokens",
+	]) {
+		assert.ok(tasks.includes(needle), `в «4. Tasks» есть ${needle}`);
+	}
+	const acceptance = section(text, "## 5. Acceptance");
+	assert.ok(acceptance.includes("log_usage"), "в приёмке есть log_usage");
+	assert.ok(acceptance.includes("acceptance"), "в приёмке есть роль acceptance");
+	assert.ok(text.split("\n").length <= 250, "скилл не длиннее 250 строк");
+});
+
+test("скилл actari и README описывают log_usage", () => {
+	const skill = readFileSync(join(ROOT, "skills", "actari", "SKILL.md"), "utf8");
+	assert.ok(skill.includes("log_usage"), "в скилле actari есть log_usage");
+	assert.ok(skill.includes("usage_file"), "в скилле actari есть usage_file");
+	for (const needle of ["session", "claude-code", "opencode", "codex"]) {
+		assert.ok(skill.includes(needle), `в скилле actari есть ${needle}`);
+	}
+	const readme = readFileSync(join(ROOT, "README.md"), "utf8");
+	assert.ok(readme.includes("log_usage"), "в README есть log_usage");
+	assert.ok(readme.includes("usage_file"), "в README есть usage_file");
+	for (const needle of ["session", "claude-code", "opencode", "codex"]) {
+		assert.ok(readme.includes(needle), `в README есть ${needle}`);
+	}
+});
+
 test("скилл actari ссылается на feature", () => {
 	const text = readFileSync(join(ROOT, "skills", "actari", "SKILL.md"), "utf8");
 	assert.ok(section(text, "## Getting started").includes("actari:feature"));

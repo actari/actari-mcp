@@ -606,6 +606,62 @@ test("pushJournal: Released уходит в push, eventProject берёт про
 	);
 });
 
+test("pushJournal: UsageRecorded уходит в push, eventProject берёт проект из payload", async (t) => {
+	const dir = tmpDir();
+	const dbPath = join(dir, "journal.db");
+	const { db, raw } = openDb(dbPath);
+	db.exec(readFileSync(SCHEMA, "utf8"));
+	raw("_general", "ProjectRegistered", { name: "test", root_path: "/tmp/test" });
+	raw("test/usage-one", "TaskDrafted", { project: "test", title: "Работа", task_text: "x" });
+	raw("test/usage-one", "Delegated", { executor: "subagent" });
+	const usage = {
+		project: "test",
+		role: "executor",
+		source: "subagent",
+		total_tokens: 1800,
+		input_tokens: 800,
+		output_tokens: 1000,
+	};
+	raw("test/usage-one", "UsageRecorded", usage);
+	db.close();
+
+	assert.equal(
+		eventProject({ taskId: "test/usage-one", type: "UsageRecorded", payload: usage }),
+		"test",
+	);
+	assert.equal(
+		shouldSyncEvent(
+			{ taskId: "test/usage-one", type: "UsageRecorded", payload: usage },
+			new Set(["test"]),
+		),
+		true,
+	);
+	assert.equal(
+		shouldSyncEvent(
+			{ taskId: "test/usage-one", type: "UsageRecorded", payload: usage },
+			new Set(["other"]),
+		),
+		false,
+	);
+
+	let capturedEvents = [];
+	const cloud = await startMockCloud(t, {
+		postWarnings: (events) => {
+			capturedEvents = events;
+			return [];
+		},
+	});
+	const config = { url: cloud.url, token: TOKEN, journalId: JOURNAL };
+
+	const r = await pushJournal({ dbPath, config });
+	assertOneTarget(r, { pushed: 4, lastSeq: 4 });
+	const sent = capturedEvents.find((e) => e.type === "UsageRecorded");
+	assert.ok(sent, "событие UsageRecorded есть в принятом облаком батче");
+	assert.equal(sent.taskId, "test/usage-one");
+	assert.equal(sent.payload.total_tokens, 1800);
+	assert.equal(sent.payload.role, "executor");
+});
+
 test("pushJournal: область синка — Released чужого проекта не уезжает", async (t) => {
 	const dir = tmpDir();
 	const dbPath = join(dir, "journal.db");

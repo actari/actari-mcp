@@ -1,0 +1,4 @@
+{"type": "step_start", "part": {"type": "step-start"}}
+{"type": "step_finish", "part": {"type": "step-finish", "cost": 0.01, "tokens": {"total": 1500, "input": 1000, "output": 300, "reasoning": 100, "cache": {"read": 50, "write": 50}}}}
+{"type": "text", "part": {"type": "text", "text": "привет"}}
+{"type": "step-finish", "cost": 0.005, "tokens": {"total": 600, "input": 400, "output": 100, "reasoning": 50, "cache": {"read": 30, "write": 20}}}

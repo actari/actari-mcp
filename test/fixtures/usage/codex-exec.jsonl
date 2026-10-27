@@ -1,0 +1,6 @@
+{"type": "thread.started", "thread_id": "019a0000-0000-7000-8000-000000000003"}
+{"type": "turn.started"}
+{"type": "item.completed", "item": {"id": "item_0", "type": "agent_message", "text": "готово"}}
+{"type": "turn.completed", "usage": {"input_tokens": 35225, "cached_input_tokens": 27136, "cache_write_input_tokens": 0, "output_tokens": 164, "reasoning_output_tokens": 60}}
+{"type": "turn.started"}
+{"type": "turn.completed", "usage": {"input_tokens": 1000, "cached_input_tokens": 600, "cache_write_input_tokens": 50, "output_tokens": 36, "reasoning_output_tokens": 10}}

@@ -13,6 +13,8 @@ import { fileURLToPath } from "node:url";
 import { ADR_FORMAT_HINT, parseAdrSections } from "./adr.mjs";
 import { readEnv } from "./env.mjs";
 import { checkToolArguments, formatToolArgumentsError, formatUnknownHint } from "./tool-args.mjs";
+import { parseUsageFile } from "./usage-file.mjs";
+import { findUsageBySession } from "./usage-session.mjs";
 import {
 	defaultJournalId,
 	fetchCursor,
@@ -116,7 +118,7 @@ function tasksHaveEvidenceColumn(database) {
 
 // CHECK типов событий не меняется ALTER'ом — старую схему узнаём по тексту DDL.
 // Новый тип события — новая строка в этом списке, иначе IF NOT EXISTS оставит старый CHECK.
-const REQUIRED_EVENT_TYPES = ["Dropped", "Released"];
+const REQUIRED_EVENT_TYPES = ["Dropped", "Released", "UsageRecorded"];
 function eventsAcceptAllTypes(database) {
 	const row = database
 		.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='events'")
@@ -665,6 +667,44 @@ const BASE_DESCRIPTIONS = {
 };
 const describe = (act) => renderToolDescription(BASE_DESCRIPTIONS[act], STARTUP_POLICY, act);
 
+// ============ токены AI по задаче (UsageRecorded) ============
+
+const USAGE_BREAKDOWN_FIELDS = [
+	"input_tokens",
+	"output_tokens",
+	"cache_read_tokens",
+	"cache_write_tokens",
+];
+const USAGE_TOKEN_FIELDS = ["total_tokens", ...USAGE_BREAKDOWN_FIELDS];
+
+// Сумма по событиям UsageRecorded задачи; нет записей — null (в get_task поля usage нет).
+// Поле разбивки суммируется по записям, где оно есть; ни у одной нет — null.
+function summarizeUsage(taskId) {
+	const rows = db
+		.prepare("SELECT payload FROM events WHERE task_id = ? AND type = 'UsageRecorded' ORDER BY seq")
+		.all(taskId);
+	if (rows.length === 0) return null;
+	const sums = { total_tokens: 0 };
+	for (const field of USAGE_BREAKDOWN_FIELDS) sums[field] = null;
+	const byRole = { executor: 0, acceptance: 0 };
+	let cost = null;
+	for (const row of rows) {
+		const payload = JSON.parse(row.payload);
+		const total = Number.isFinite(payload.total_tokens) ? payload.total_tokens : 0;
+		sums.total_tokens += total;
+		for (const field of USAGE_BREAKDOWN_FIELDS) {
+			if (Number.isFinite(payload[field])) sums[field] = (sums[field] ?? 0) + payload[field];
+		}
+		if (payload.role in byRole) byRole[payload.role] += total;
+		if (Number.isFinite(payload.cost_usd)) cost = (cost ?? 0) + payload.cost_usd;
+	}
+	const usage = { ...sums };
+	if (cost !== null) usage.cost_usd = Math.round(cost * 1e6) / 1e6;
+	usage.records = rows.length;
+	usage.by_role = byRole;
+	return usage;
+}
+
 const TOOLS = [
 	{
 		name: "search_precedents",
@@ -1148,6 +1188,147 @@ const TOOLS = [
 			return db
 				.prepare("SELECT from_task, to_task, kind, at FROM task_links WHERE from_task = ?")
 				.all(from_task_id);
+		},
+	},
+	{
+		name: "log_usage",
+		description:
+			"Записать токены AI по задаче (событие UsageRecorded): расход исполнителя или приёмки. " +
+			"Статус задачи не меняет; допустимо из любого статуса, кроме DRAFT. Числа — только из результата " +
+			"субагента или вывода запуска, не на глаз. Лучше всего передать session { client, id }: " +
+			"сервер сам найдёт токены по id, который вернул клиент (Claude Code — agentId субагента или " +
+			'session_id, opencode — id из <task id="ses_…">, Codex — thread_id или task_name из ' +
+			"spawn_agent). Или usage_file: сервер посчитает токены из транскрипта Claude Code (JSONL), " +
+			"вывода `claude -p --output-format json`, `opencode run --format json` или " +
+			"`codex exec --json`. Либо total_tokens, либо разбивка (input/output/cache), либо " +
+			"usage_file, либо session — один источник на вызов. role: executor — исполнитель, " +
+			"acceptance — приёмка. " +
+			"source: subagent — субагент/форк Claude Code, headless — внешний исполнитель по профилю.",
+		inputSchema: {
+			type: "object",
+			properties: {
+				project: { type: "string", description: "Зарегистрированный проект задачи" },
+				task_id: { type: "string" },
+				role: { type: "string", description: "executor | acceptance" },
+				source: { type: "string", description: "subagent | headless" },
+				model: { type: "string", description: "Модель (из usage_file, если не передана)" },
+				usage_file: {
+					type: "string",
+					description:
+						"Путь к файлу запуска: транскрипт субагента (~/.claude/projects/…/subagents/agent-<id>.jsonl), вывод claude -p --output-format json, opencode run --format json или codex exec --json. Числа считает сервер.",
+				},
+				session: {
+					type: "object",
+					description:
+						"Сессия клиента, токены которой сервер найдёт сам: { client: claude-code | opencode | codex, id }. claude-code — agentId субагента или session_id; opencode — id сессии ses_…; codex — thread_id (UUID) или task_name субагента (/root/…). Числа считает сервер.",
+					properties: {
+						client: { type: "string", description: "claude-code | opencode | codex" },
+						id: { type: "string" },
+					},
+					required: ["client", "id"],
+				},
+				total_tokens: { type: "number", description: "Всего токенов (целое ≥ 0)" },
+				input_tokens: { type: "number" },
+				output_tokens: { type: "number" },
+				cache_read_tokens: { type: "number" },
+				cache_write_tokens: { type: "number" },
+				cost_usd: { type: "number", description: "Стоимость по данным клиента (≥ 0)" },
+			},
+			required: ["project", "task_id", "role", "source"],
+		},
+		handler: ({ project, task_id, role, source, model, usage_file, session, ...numbers }) => {
+			if (!["executor", "acceptance"].includes(role)) {
+				throw new Error("role: executor | acceptance; токены не записаны");
+			}
+			if (!["subagent", "headless"].includes(source)) {
+				throw new Error("source: subagent | headless; токены не записаны");
+			}
+			// tool-args проверяет только базовый тип: целость и знак — здесь, до события.
+			for (const field of USAGE_TOKEN_FIELDS) {
+				const value = numbers[field];
+				if (value === undefined || value === null) continue;
+				if (!Number.isInteger(value) || value < 0) {
+					throw new Error(`${field} — целое число токенов ≥ 0; токены не записаны`);
+				}
+			}
+			const cost = numbers.cost_usd;
+			if (cost !== undefined && cost !== null && (!Number.isFinite(cost) || cost < 0)) {
+				throw new Error("cost_usd — число ≥ 0; токены не записаны");
+			}
+			const given = USAGE_TOKEN_FIELDS.filter(
+				(field) => numbers[field] !== undefined && numbers[field] !== null,
+			);
+			const hasFile = typeof usage_file === "string" && usage_file.trim() !== "";
+			const hasSession = session !== undefined && session !== null;
+			const hasNumbers = given.length > 0 || (cost !== undefined && cost !== null);
+			if ((hasFile ? 1 : 0) + (hasSession ? 1 : 0) + (hasNumbers ? 1 : 0) > 1) {
+				throw new Error(
+					"числа, usage_file и session вместе нельзя — один источник; токены не записаны",
+				);
+			}
+			if (!hasFile && !hasSession && given.length === 0) {
+				throw new Error(
+					"нужны session, usage_file, total_tokens или разбивка токенов; токены не записаны",
+				);
+			}
+			const task = getTaskStmt.get(task_id);
+			if (!task) throw new Error(`Задача ${task_id} не найдена`);
+			if (task.status === "DRAFT") {
+				throw new Error(
+					`UsageRecorded недопустим из статуса DRAFT: токены пишут после делегирования; токены не записаны`,
+				);
+			}
+			if (task.project !== project) {
+				throw new Error(
+					`проект «${project}» не совпадает с проектом задачи «${task.project}»; токены не записаны`,
+				);
+			}
+			const payload = { project, role, source };
+			if (hasFile || hasSession) {
+				let parsed;
+				try {
+					parsed = hasFile ? parseUsageFile(usage_file) : findUsageBySession(session);
+				} catch (err) {
+					throw new Error(
+						`${hasFile ? "usage_file" : "session"}: ${err.message}; токены не записаны`,
+					);
+				}
+				const { format, model: fileModel, cost_usd, total_tokens, ...tokens } = parsed;
+				const resolvedModel = model || fileModel;
+				if (resolvedModel) payload.model = resolvedModel;
+				Object.assign(payload, tokens);
+				// итог клиента (Codex) важнее суммы полей, если он есть
+				payload.total_tokens =
+					total_tokens ??
+					tokens.input_tokens +
+						tokens.output_tokens +
+						tokens.cache_read_tokens +
+						tokens.cache_write_tokens;
+				if (cost_usd !== undefined) payload.cost_usd = cost_usd;
+				payload.usage_format = format;
+			} else {
+				if (model) payload.model = model;
+				for (const field of USAGE_TOKEN_FIELDS) {
+					if (numbers[field] !== undefined && numbers[field] !== null) {
+						payload[field] = numbers[field];
+					}
+				}
+				if (payload.total_tokens === undefined) {
+					payload.total_tokens = USAGE_BREAKDOWN_FIELDS.reduce(
+						(sum, field) => sum + (payload[field] ?? 0),
+						0,
+					);
+				}
+				if (cost !== undefined && cost !== null) payload.cost_usd = cost;
+			}
+			appendEvent(task_id, "UsageRecorded", JSON.stringify(payload));
+			return {
+				recorded: true,
+				task_id,
+				role,
+				total_tokens: payload.total_tokens,
+				usage: summarizeUsage(task_id),
+			};
 		},
 	},
 	{
@@ -2156,7 +2337,8 @@ const TOOLS = [
 				.all(task_id);
 			const intentTaskId = intentOfJournalTask(task_id);
 			const intent = intentTaskId ? await summarizeIntent(intentTaskId) : null;
-			const extra = intent ? { intent } : {};
+			const usage = summarizeUsage(task_id);
+			const extra = { ...(intent ? { intent } : {}), ...(usage ? { usage } : {}) };
 			if (full) return { task, events, links, artifacts, ...extra };
 			return {
 				task: compactTask(task),

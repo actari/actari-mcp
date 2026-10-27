@@ -20,6 +20,7 @@ CREATE TABLE IF NOT EXISTS events (
                 'IncidentRecorded', -- payload: description, lesson
                 'ArtifactRecorded', -- payload: project, kind, title, body
                 'TaskLinked',       -- payload: to_task_id, kind
+                'UsageRecorded',    -- payload: project, role, source, total_tokens, input_tokens?, output_tokens?, cache_read_tokens?, cache_write_tokens?, cost_usd?, model?, usage_format?
                 'ProjectRegistered', -- payload: name, root_path, cloud_workspace_id
                 'Released'          -- payload: project, items, ref?, summary?
             )),
@@ -44,7 +45,7 @@ WHEN NOT json_valid(NEW.payload)
 BEGIN SELECT RAISE(ABORT, 'payload must be valid JSON'); END;
 
 CREATE TRIGGER IF NOT EXISTS guard_project_registered BEFORE INSERT ON events
-WHEN NEW.type IN ('TaskDrafted', 'ArtifactRecorded', 'Released')
+WHEN NEW.type IN ('TaskDrafted', 'ArtifactRecorded', 'Released', 'UsageRecorded')
  AND (json_extract(NEW.payload, '$.project') IS NULL
       OR NOT EXISTS (SELECT 1 FROM projects WHERE name = json_extract(NEW.payload, '$.project')))
 BEGIN SELECT RAISE(ABORT, 'project missing or not registered'); END;
@@ -85,6 +86,11 @@ WHEN NEW.type = 'TaskLinked'
       OR NOT EXISTS (SELECT 1 FROM tasks WHERE task_id = json_extract(NEW.payload, '$.to_task_id'))
       OR json_extract(NEW.payload, '$.to_task_id') = NEW.task_id)
 BEGIN SELECT RAISE(ABORT, 'link endpoints must be distinct existing tasks'); END;
+
+CREATE TRIGGER IF NOT EXISTS guard_usage BEFORE INSERT ON events
+WHEN NEW.type = 'UsageRecorded'
+ AND coalesce((SELECT status FROM tasks WHERE task_id = NEW.task_id), 'NONE') IN ('NONE', 'DRAFT')
+BEGIN SELECT RAISE(ABORT, 'UsageRecorded not allowed from DRAFT or for unknown task'); END;
 
 -- ============ проекции ============
 
