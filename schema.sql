@@ -266,33 +266,6 @@ BEGIN
 END;
 
 -- ============ полнотекстовый поиск ============
-
-CREATE VIRTUAL TABLE IF NOT EXISTS task_fts USING fts5(
-    title, task_text, report_text,
-    content = 'tasks', content_rowid = 'rowid'
-);
-
-CREATE TRIGGER IF NOT EXISTS tasks_fts_insert AFTER INSERT ON tasks
-BEGIN
-    INSERT INTO task_fts(rowid, title, task_text, report_text)
-    VALUES (NEW.rowid, NEW.title, NEW.task_text, NEW.report_text);
-END;
-
-CREATE TRIGGER IF NOT EXISTS tasks_fts_update AFTER UPDATE ON tasks
-BEGIN
-    INSERT INTO task_fts(task_fts, rowid, title, task_text, report_text)
-    VALUES ('delete', OLD.rowid, OLD.title, OLD.task_text, OLD.report_text);
-    INSERT INTO task_fts(rowid, title, task_text, report_text)
-    VALUES (NEW.rowid, NEW.title, NEW.task_text, NEW.report_text);
-END;
-
-CREATE VIRTUAL TABLE IF NOT EXISTS artifact_fts USING fts5(
-    title, body,
-    content = 'artifacts', content_rowid = 'id'
-);
-
-CREATE TRIGGER IF NOT EXISTS artifacts_fts_insert AFTER INSERT ON artifacts
-BEGIN
-    INSERT INTO artifact_fts(rowid, title, body)
-    VALUES (NEW.id, NEW.title, NEW.body);
-END;
+-- Индекс поиска (search_chunks, search_fts, search_vectors, search_meta) создаёт и
+-- перестраивает на месте search-index.mjs (ensureSearchIndex): анализ слов — JS-пакет,
+-- не SQL-триггеры. Старые task_fts/artifact_fts и их триггеры удаляются той же миграцией.

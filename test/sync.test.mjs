@@ -958,7 +958,7 @@ test("MCP connect: успех → sync.json написан рядом с баз�
 	});
 	assert.equal(
 		r.text,
-		`подключено: журнал my-journal, пространства: ${WORKSPACE_SLUG} (курсор 0), конфиг ${configPath}`,
+		`подключено: журнал my-journal, пространства: ${WORKSPACE_SLUG} (курсор 0), конфиг ${configPath}\nпоиск: слова`,
 	);
 	assert.deepEqual(JSON.parse(readFileSync(configPath, "utf8")), {
 		url: cloud.baseUrl,
@@ -1704,7 +1704,7 @@ test("MCP connect: без url подключается к облаку по ум
 
 	assert.equal(
 		r.text,
-		`подключено: журнал default-cloud, пространства: ${WORKSPACE_SLUG} (курсор 0), конфиг ${configPath}`,
+		`подключено: журнал default-cloud, пространства: ${WORKSPACE_SLUG} (курсор 0), конфиг ${configPath}\nпоиск: слова`,
 	);
 	assert.equal(cloud.state.cursorPath, "/api/mcp/journal-sync");
 	const cfg = JSON.parse(readFileSync(configPath, "utf8"));

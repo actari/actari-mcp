@@ -163,6 +163,45 @@ Data lives in `~/.actari/journal.db` (override with `ACTARI_DB`).
 On first start the server creates the directory and the database itself.
 `sync.json` always sits next to the database.
 
+## Search (`search_precedents`)
+
+`search_precedents { query, project?, limit?, full? }` looks for similar tasks
+(brief and report), artifacts and incidents across **all** projects of the
+journal. Words are matched by stems (Snowball, Russian and English), so
+«расписание» finds «расписании»; the project of the directory the server was
+started in ranks higher, and `project` narrows the search to one project.
+An artifact shows up as one entry — the freshest version that matches (an older
+version carries `version_label`). Service notes (`acceptance:`, `release:`,
+`released:`, `brief:`, `progress:`) are not searched; `Project baseline` is.
+
+The index lives in the same `journal.db` (`search_chunks`, `search_fts`,
+`search_vectors`, `search_meta`). When a new package version changes the word
+analysis, the index is rebuilt **in place** in one transaction on the first
+start (a line goes to stderr); the database file is never replaced. Restart
+running sessions after an upgrade — older server versions do not know the new
+index.
+
+### Vectors (opt-in)
+
+By default search is words only and nothing leaves your machine. To add
+semantic search, set **both**:
+
+```
+ACTARI_SEARCH_EMBEDDINGS=on
+OPENAI_EMBEDDING_BASE_URL=https://…/v1     # OpenAI-compatible /embeddings
+OPENAI_EMBEDDING_MODEL=intfloat/multilingual-e5-large
+# optional: OPENAI_EMBEDDING_API_KEY, OPENAI_EMBEDDING_API_KEY_HEADER (e.g. X-API-Key)
+```
+
+With the switch on, **journal text (tasks, artifacts, incidents) is sent to that
+service** to compute embeddings; the variables alone are not enough. Missing
+vectors are computed lazily (up to 64 per search, the rest in the background);
+if the service fails the answer falls back to words. `connect` prints the mode:
+`поиск: слова` or `поиск: слова + векторы (host, model)`.
+
+The search package is vendored into `vendor/search/` (a copy of the
+`@actari/search` ES build); refresh it with `pnpm --filter actari-mcp vendor:search`.
+
 ## Connect to the cloud (optional)
 
 `connect` needs only a token — the managed Actari cloud is the default.

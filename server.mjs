@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // actari — MCP-сервер журнала задач для AI-агентов.
 // Хранилище: ~/.actari/journal.db (event sourcing: append-only events,
-// проекции tasks/incidents через триггеры, FTS5); путь перекрывается
+// проекции tasks/incidents через триггеры, индекс поиска search-index.mjs); путь перекрывается
 // ACTARI_DB — см. resolveDbPath в sync.mjs.
 // Zero deps: node:sqlite (Node >= 22.5).
 
@@ -12,6 +12,16 @@ import { fileURLToPath } from "node:url";
 
 import { ADR_FORMAT_HINT, parseAdrSections } from "./adr.mjs";
 import { readEnv } from "./env.mjs";
+import {
+	createEmbedder,
+	embeddingsConfig,
+	ensureSearchIndex,
+	fillEmbeddings,
+	indexPending,
+	missingEmbeddingsCount,
+	searchModeLine,
+	searchPrecedents,
+} from "./search-index.mjs";
 import { checkToolArguments, formatToolArgumentsError, formatUnknownHint } from "./tool-args.mjs";
 import { parseUsageFile } from "./usage-file.mjs";
 import { findUsageBySession } from "./usage-session.mjs";
@@ -183,6 +193,10 @@ if (!hasEvents) {
 // Служебные таблицы кэша намерений (спека 2026-09-14 §9.1) — не события.
 db.exec(INTENT_CACHE_DDL);
 
+// Индекс поиска: создаётся и при смене версии перестраивается НА МЕСТЕ в транзакции
+// (файл базы не подменяется — инциденты 92, 93, 152).
+ensureSearchIndex(db);
+
 // Допустимые переходы: событие → из каких статусов его можно применить.
 const VALID_FROM = {
 	Delegated: ["DRAFT", "REWORK"],
@@ -242,8 +256,28 @@ function scheduleAutoPush() {
 }
 
 // Общая точка записи события: вставка + авто-пуш (только после успешной вставки).
+// Индексация поиска — в той же транзакции, что и событие; сбой индекса не теряет событие
+// (savepoint откатывается, индекс догонит при следующей записи или поиске).
 function appendEvent(taskId, type, payloadJson) {
-	insertEventStmt.run(taskId, type, payloadJson);
+	db.exec("BEGIN IMMEDIATE");
+	try {
+		insertEventStmt.run(taskId, type, payloadJson);
+		db.exec("SAVEPOINT search_index");
+		try {
+			indexPending(db);
+			db.exec("RELEASE search_index");
+		} catch (err) {
+			db.exec("ROLLBACK TO search_index");
+			db.exec("RELEASE search_index");
+			console.error(`actari: индекс поиска не обновлён, догонит позже: ${err.message}`);
+		}
+		db.exec("COMMIT");
+	} catch (err) {
+		try {
+			db.exec("ROLLBACK");
+		} catch {}
+		throw err;
+	}
 	scheduleAutoPush();
 }
 
@@ -276,26 +310,6 @@ function compactTask(task) {
 		task_text_length: task_text?.length ?? 0,
 		report_length: report_text?.length ?? 0,
 		has_report: Boolean(report_text),
-	};
-}
-
-const INCIDENT_SNIPPET_LEN = 280;
-
-function truncateField(text) {
-	if (text == null) return text;
-	return text.length > INCIDENT_SNIPPET_LEN ? `${text.slice(0, INCIDENT_SNIPPET_LEN)}…` : text;
-}
-
-// Компактный вид инцидента: description/lesson обрезаны до 280 символов
-// (в живом журнале — до 2 КБ каждый, см. диагноз T6), с их длинами.
-function compactIncident(incident) {
-	const { description, lesson, ...rest } = incident;
-	return {
-		...rest,
-		description: truncateField(description),
-		lesson: truncateField(lesson),
-		description_length: description?.length ?? 0,
-		lesson_length: lesson?.length ?? 0,
 	};
 }
 
@@ -552,16 +566,6 @@ function syncWarningText(warning) {
 	return formatSyncWarning(warning, row?.task_id ?? null);
 }
 
-// Префиксный матч каждого токена: русская морфология без стеммера —
-// «стандарт» находит «стандарты/стандартов», «ранг» — «ранги».
-function ftsExpr(query) {
-	return query
-		.split(/\s+/)
-		.filter(Boolean)
-		.map((t) => `"${t.replaceAll('"', '""')}"*`)
-		.join(" OR ");
-}
-
 const getProjectStmt = db.prepare("SELECT * FROM projects WHERE name = ?");
 
 // Нормализация имени проекта для поиска почти-дублей: dompro ~ dom-pro ~ DomPro
@@ -579,6 +583,29 @@ function pathsOverlap(a, b) {
 	const A = withSlash(a);
 	const B = withSlash(b);
 	return A === B || A.startsWith(B) || B.startsWith(A);
+}
+
+// Проекты, чей корень покрывает путь (или пересекается с ним) — общая логика resolve_project
+// и определения проекта текущего каталога для search_precedents.
+function projectsByPath(all, path) {
+	return all.filter(
+		(p) => withSlash(path).startsWith(withSlash(p.root_path)) || pathsOverlap(p.root_path, path),
+	);
+}
+
+// Проект каталога процесса: самый глубокий корень, внутри которого лежит cwd; нет — null.
+function currentProjectOfCwd() {
+	try {
+		const all = db.prepare("SELECT name, root_path FROM projects").all();
+		const cwd = process.cwd();
+		const inside = projectsByPath(all, cwd).filter((p) =>
+			withSlash(cwd).startsWith(withSlash(p.root_path)),
+		);
+		inside.sort((a, b) => b.root_path.length - a.root_path.length);
+		return inside[0]?.name ?? null;
+	} catch {
+		return null;
+	}
 }
 
 function findProjectConflicts(name, root_path) {
@@ -705,56 +732,60 @@ function summarizeUsage(taskId) {
 	return usage;
 }
 
+// Векторы досчитываются фоном после ответа: порциями, пока есть недостающие (не больше BACKGROUND_EMBED_MAX за запуск).
+const BACKGROUND_EMBED_MAX = 512;
+let embedFillInFlight = false;
+function scheduleEmbeddingFill(embedder) {
+	if (embedFillInFlight || missingEmbeddingsCount(db, embedder) === 0) return;
+	embedFillInFlight = true;
+	setImmediate(async () => {
+		try {
+			let done = 0;
+			while (done < BACKGROUND_EMBED_MAX) {
+				const n = await fillEmbeddings(db, embedder, { max: 64 });
+				if (n === 0) break;
+				done += n;
+			}
+		} catch (err) {
+			console.error(`actari: фоновый расчёт векторов поиска не удался: ${err.message}`);
+		} finally {
+			embedFillInFlight = false;
+		}
+	});
+}
+
 const TOOLS = [
 	{
 		name: "search_precedents",
 		description:
-			"Полнотекстовый поиск похожих задач (задания + отчёты), артефактов и инцидентов по всем проектам. " +
+			"Поиск похожих задач (задания + отчёты), артефактов и инцидентов по всем проектам: слова с морфологией " +
+			"(ru/en), проект текущего каталога выше остальных; артефакт — одной записью, свежайшей подходящей версией " +
+			"(у старой версии — version_label). project — жёсткий фильтр (инциденты без проекта при нём не возвращаются). " +
 			"Инциденты — первые 280 символов; целиком — с full: true.",
 		inputSchema: {
 			type: "object",
 			properties: {
 				query: { type: "string", description: "Ключевые слова (любой язык)" },
-				limit: { type: "number", description: "Максимум задач (default 5)" },
+				limit: { type: "number", description: "Максимум задач и артефактов (default 5)" },
+				project: { type: "string", description: "Искать только в этом проекте" },
 				full: { type: "boolean", description: "true — инциденты целиком" },
 			},
 			required: ["query"],
 		},
-		handler: ({ query, limit = 5, full = false }) => {
-			const expr = ftsExpr(query);
-			const tasks = expr
-				? db
-						.prepare(
-							`SELECT t.task_id, t.project, t.title, t.status, t.outcome, t.evidence,
-							        snippet(task_fts, 1, '[', ']', '…', 12) AS task_snippet,
-							        snippet(task_fts, 2, '[', ']', '…', 12) AS report_snippet
-							 FROM task_fts JOIN tasks t ON t.rowid = task_fts.rowid
-							 WHERE task_fts MATCH ? ORDER BY rank LIMIT ?`,
-						)
-						.all(expr, limit)
-				: [];
-			const words = query.split(/\s+/).filter(Boolean);
-			const cond = words.map(() => "(description LIKE ? OR lesson LIKE ?)").join(" OR ");
-			const args = words.flatMap((w) => [`%${w}%`, `%${w}%`]);
-			const incidentRows = words.length
-				? db
-						.prepare(
-							`SELECT id, task_id, description, lesson, at FROM incidents WHERE ${cond} ORDER BY at DESC LIMIT 10`,
-						)
-						.all(...args)
-				: [];
-			const incidents = full ? incidentRows : incidentRows.map(compactIncident);
-			const artifacts = expr
-				? db
-						.prepare(
-							`SELECT a.id, a.project, a.kind, a.title, a.task_id, a.at,
-							        snippet(artifact_fts, 1, '[', ']', '…', 12) AS body_snippet
-							 FROM artifact_fts JOIN artifacts a ON a.id = artifact_fts.rowid
-							 WHERE artifact_fts MATCH ? ORDER BY rank LIMIT ?`,
-						)
-						.all(expr, limit)
-				: [];
-			return { tasks, artifacts, incidents };
+		handler: async ({ query, limit = 5, full = false, project }) => {
+			const cfg = embeddingsConfig();
+			const embeddings = createEmbedder(cfg);
+			const result = await searchPrecedents(db, {
+				query,
+				project: project || null,
+				limit,
+				full,
+				currentProject: currentProjectOfCwd(),
+				embeddings,
+				log: (line) => console.error(line),
+			});
+			if (embeddings) scheduleEmbeddingFill(embeddings);
+			return result;
 		},
 	},
 	{
@@ -825,12 +856,7 @@ const TOOLS = [
 		},
 		handler: ({ path, name }) => {
 			const all = db.prepare("SELECT name, root_path, cloud_workspace_id, at FROM projects").all();
-			const byPath = path
-				? all.filter(
-						(p) =>
-							withSlash(path).startsWith(withSlash(p.root_path)) || pathsOverlap(p.root_path, path),
-					)
-				: [];
+			const byPath = path ? projectsByPath(all, path) : [];
 			const norm = name ? normalizeProjectName(name) : null;
 			const byName = norm
 				? all.filter(
@@ -1539,7 +1565,8 @@ const TOOLS = [
 				workspaces.length === 0
 					? "пространств у пользователя нет — журнал пока никуда не поедет"
 					: `пространства: ${workspaces.map((w) => `${w.slug} (курсор ${w.lastSeq})`).join(", ")}`;
-			let connected = `подключено: журнал ${journalId}, ${spaces}, конфиг ${configPath}`;
+			const searchCfg = embeddingsConfig();
+			let connected = `подключено: журнал ${journalId}, ${spaces}, конфиг ${configPath}\n${searchModeLine(searchCfg)}${searchCfg.reason ? ` (${searchCfg.reason})` : ""}`;
 			if (config.targets) {
 				// Целей стало несколько — человек должен видеть, куда теперь едет журнал.
 				const aliases = config.targets.map((t, index) => targetAlias(t, index)).join(", ");
