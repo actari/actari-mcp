@@ -234,6 +234,16 @@ thread, signed with the token owner's name and marked "via MCP". The feature is
 addressed by the same `(project, slug)` key as `publish_intent`, in the
 project's `cloud_workspace_id`.
 
+`system_map { project, element?, level?, query? }` reads the workspace's system
+map (C4 context, containers, components and domain entities) as text:
+`element` is a map key such as `backend_api` (description, technologies,
+members, relations both ways, sources), `level` is `context | container |
+component | entity`, `query` searches names, descriptions and technologies;
+without arguments it returns the context and containers. Elements marked
+"по истории — проверьте" are not confirmed by a human. Read-only: the map is
+built and edited on the "Система" page in the cloud. The project must have a
+`cloud_workspace_id`.
+
 `log_time { task_id, hours, date?, note? }` logs time on a cloud task as the
 token's owner, exactly like "Log time" in the task card (minimum 15 minutes,
 `hours: 1.5` = 1 h 30 min, `date` defaults to today). `task_id` is a cloud

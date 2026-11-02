@@ -134,6 +134,16 @@ export function startIntentCloud(
 		featureQuestions = null,
 		// принудительный ответ GET feature-questions: { status, body } (403, 503 и т. п.)
 		questionsOverride = null,
+		// ответ GET /api/mcp/read/system-map: функция (параметры запроса) -> { text }; null — маршрута нет (404)
+		systemMap = null,
+		// принудительный ответ GET system-map: { status, body } (404 not found, 409, 503 и т. п.)
+		systemMapOverride = null,
+		// ответы инструментов архитектора: функция (параметры GET или тело POST) -> { status, text };
+		// null — маршрута нет (404). review — GET read/architecture-review, reviewText — POST
+		// architecture/review, check — GET read/architecture-check.
+		architecture = { review: null, reviewText: null, check: null },
+		// принудительный ответ всем трём маршрутам архитектора: { status, body } (404, 409, 503 и т. п.)
+		architectureOverride = null,
 		// ответ POST /api/mcp/feature-questions/answer: статус и тело; по умолчанию 200 {question}
 		answerStatus = 200,
 		answerBody = null,
@@ -157,6 +167,9 @@ export function startIntentCloud(
 		workLogOverride: null,
 		// query-параметры GET feature-questions и тела POST answer — что реально ушло в облако
 		questionQueries: [],
+		systemMapQueries: [],
+		// что реально ушло в облако: GET review, POST review (тело), GET check
+		architectureQueries: { review: [], reviewText: [], check: [] },
 		answers: [],
 		// id намерения -> "task_deleted" | "feature_deleted": задачу или фичу удалил человек.
 		deleted: new Map(),
@@ -418,6 +431,36 @@ export function startIntentCloud(
 					taskTitle: task.title,
 					totalMinutes: task.totalMinutes,
 				});
+			}
+
+			if (path.endsWith("/api/mcp/read/system-map")) {
+				if (req.method !== "GET") return send(404, { error: "Unknown endpoint" });
+				const query = Object.fromEntries(url.searchParams);
+				state.systemMapQueries.push(query);
+				if (systemMapOverride) return send(systemMapOverride.status, systemMapOverride.body ?? {});
+				if (!systemMap) return send(404, { error: "Unknown endpoint" });
+				return send(200, systemMap(query));
+			}
+
+			for (const [suffix, method, key] of [
+				["/api/mcp/read/architecture-review", "GET", "review"],
+				["/api/mcp/architecture/review", "POST", "reviewText"],
+				["/api/mcp/read/architecture-check", "GET", "check"],
+			]) {
+				if (!path.endsWith(suffix)) continue;
+				if (req.method !== method) return send(404, { error: "Unknown endpoint" });
+				const query = method === "GET" ? Object.fromEntries(url.searchParams) : body;
+				state.architectureQueries[key].push(query);
+				if (architectureOverride) {
+					return send(architectureOverride.status, architectureOverride.body ?? {});
+				}
+				const answer = architecture[key];
+				if (!answer) return send(404, { error: "Unknown endpoint" });
+				const result = answer(query);
+				return send(
+					result.httpStatus ?? 200,
+					result.body ?? { status: result.status, text: result.text },
+				);
 			}
 
 			if (path.endsWith("/api/mcp/read/feature-questions")) {

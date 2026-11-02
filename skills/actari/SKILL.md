@@ -84,11 +84,32 @@ that is the **project's policy**, data the server reads from `policy.json`
 | Overview | `get_task`, `list_tasks`, `link_tasks` |
 | Policy | `get_policy`, `set_policy` |
 | Cloud (optional) | `connect`, `sync_scope`, `sync`, `inbox`, `take`, `intent_status`, `release_intent`, `publish_intent` |
+| Architecture (cloud) | `architecture_review` (review of a feature or a draft text against the system map and valid ADRs), `architecture_check` (valid ADRs of a task's touched elements for acceptance) |
 | Time (cloud only) | `log_time` (log hours on a cloud task as the token owner; never writes locally) |
 | Usage | `log_usage` (AI tokens spent on a task, by role `executor` / `acceptance`; local journal, any status except DRAFT) |
 
 Prompts: `tasks` (show the journal), `bootstrap` (create the artifact the
 policy requires before drafting, if any).
+
+## Architecture
+
+Two read-only tools ask the cloud's architect; both answer with a text whose
+first line is a status.
+
+- `architecture_review { project, slug? | text?, title? }` — exactly one of
+  `slug` (a published feature) or `text` (a draft, e.g. a brief). Returns
+  touched components and entities, valid ADRs, conflicts, the architect's
+  open questions. Statuses: `ok`, `queued` (still working — retry later),
+  `no_map` (the workspace has no system map), `not_found`, `unavailable`
+  (AI off or the cloud refused). Open questions are answered on the
+  feature's "Архитектура" tab or by replying to the bot; ask no one else.
+- `architecture_check { task_id }` — the project is the task id's prefix.
+  Returns valid ADRs of the touched elements, a line "Искать в диффе: …"
+  and past discrepancies. The acceptor compares the diff with them and
+  reports a line `architecture:` in the verdict.
+
+Without a status `ok` carry on without the block and say why in one line.
+The `feature` skill (step 3b and acceptance) says when to call them.
 
 ## Journal rules
 

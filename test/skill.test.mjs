@@ -189,3 +189,51 @@ test("версия пакета одна во всех манифестах", ()
 		);
 	}
 });
+
+test("скилл feature: шаг «3b. Architecture» между облаком и задачами", () => {
+	const text = readFileSync(join(ROOT, "skills", "feature", "SKILL.md"), "utf8");
+	const at = text.search(/^## 3b\. Architecture$/m);
+	assert.ok(at > text.search(/^## 3\. From the cloud$/m), "шаг 3b идёт после шага 3");
+	assert.ok(at < text.search(/^## 4\. Tasks$/m), "шаг 3b идёт до шага 4");
+
+	const step = section(text, "## 3b. Architecture");
+	for (const needle of [
+		"architecture_review",
+		"project, slug",
+		"## Архитектура",
+		"ADR",
+		"ответьте на вкладке «Архитектура» фичи или ответом боту",
+		"queued",
+		"up to 3 times with 60 s",
+		"no_map",
+		"unavailable",
+		"architecture_check",
+	]) {
+		assert.ok(step.includes(needle), `в шаге 3b есть ${needle}`);
+	}
+	assert.match(step, /plan|tasks/i, "пока вопросы открыты, задачи не строятся");
+	assert.match(
+		section(text, "## 2. Intent"),
+		/3b/,
+		"шаг 2 называет остановку на вопросах архитектора",
+	);
+	assert.ok(text.split("\n").length <= 250, "скилл не длиннее 250 строк");
+
+	const acceptance = section(text, "## 5. Acceptance");
+	for (const needle of ["architecture_check", "architecture:", "adr:<id>", "блокирует"]) {
+		assert.ok(acceptance.includes(needle), `в приёмке есть ${needle}`);
+	}
+});
+
+test("скилл actari описывает architecture_review и architecture_check", () => {
+	const text = readFileSync(join(ROOT, "skills", "actari", "SKILL.md"), "utf8");
+	const tools = section(text, "## Tools");
+	assert.ok(tools.includes("architecture_review"), "architecture_review в таблице инструментов");
+	assert.ok(tools.includes("architecture_check"), "architecture_check в таблице инструментов");
+	const at = text.search(/^## Architecture$/m);
+	assert.ok(at >= 0, "есть раздел ## Architecture");
+	const part = section(text, "## Architecture");
+	for (const needle of ["slug", "text", "task_id", "no_map", "queued", "unavailable"]) {
+		assert.ok(part.includes(needle), `в разделе Architecture есть ${needle}`);
+	}
+});

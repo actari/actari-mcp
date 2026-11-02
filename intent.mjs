@@ -9,7 +9,13 @@ import { normalizeBaseUrl } from "./sync.mjs";
 export const INTENTS_PATH = "/api/mcp/intents";
 export const WORK_LOGS_PATH = "/api/mcp/work-logs";
 export const FEATURE_QUESTIONS_PATH = "/api/mcp/read/feature-questions";
+export const SYSTEM_MAP_PATH = "/api/mcp/read/system-map";
 export const FEATURE_QUESTION_ANSWER_PATH = "/api/mcp/feature-questions/answer";
+export const ARCHITECTURE_REVIEW_PATH = "/api/mcp/read/architecture-review";
+export const ARCHITECTURE_REVIEW_TEXT_PATH = "/api/mcp/architecture/review";
+export const ARCHITECTURE_CHECK_PATH = "/api/mcp/read/architecture-check";
+// Синхронный разбор текста в облаке ждёт AI до 90 с — запас на сеть.
+export const ARCHITECTURE_TEXT_TIMEOUT_MS = 100_000;
 export const INTENT_TIMEOUT_MS = 2000;
 export const INTENT_POLL_MS = 60_000;
 // Совпадает с CHANGE_LIMIT облака (packages/core listChanges).
@@ -465,6 +471,36 @@ export function featureQuestionsUrlFromBase(base, { workspaceId, project, slug }
 	return url.toString();
 }
 
+export function systemMapUrlFromBase(base, { workspaceId, project, element, level, query }) {
+	const url = new URL(`${normalizeBaseUrl(base)}${SYSTEM_MAP_PATH}`);
+	url.searchParams.set("project", project);
+	url.searchParams.set("workspaceId", workspaceId);
+	if (element) url.searchParams.set("element", element);
+	if (level) url.searchParams.set("level", level);
+	if (query) url.searchParams.set("query", query);
+	return url.toString();
+}
+
+export function architectureReviewUrlFromBase(base, { workspaceId, project, slug }) {
+	const url = new URL(`${normalizeBaseUrl(base)}${ARCHITECTURE_REVIEW_PATH}`);
+	url.searchParams.set("project", project);
+	url.searchParams.set("workspaceId", workspaceId);
+	url.searchParams.set("slug", slug);
+	return url.toString();
+}
+
+export function architectureCheckUrlFromBase(base, { workspaceId, project, taskId }) {
+	const url = new URL(`${normalizeBaseUrl(base)}${ARCHITECTURE_CHECK_PATH}`);
+	url.searchParams.set("project", project);
+	url.searchParams.set("workspaceId", workspaceId);
+	url.searchParams.set("task_id", taskId);
+	return url.toString();
+}
+
+export function architectureReviewTextUrlFromBase(base) {
+	return `${normalizeBaseUrl(base)}${ARCHITECTURE_REVIEW_TEXT_PATH}`;
+}
+
 export function featureQuestionAnswerUrlFromBase(base) {
 	return `${normalizeBaseUrl(base)}${FEATURE_QUESTION_ANSWER_PATH}`;
 }
@@ -618,6 +654,131 @@ export async function getFeatureQuestions({
 	return classifyFeatureQuestionsResponse(res, payload, (body) => Array.isArray(body?.questions));
 }
 
+// Карта системы (спека system-map §6): { text } от GET read/system-map. 404 с телом роута
+// {error:"not found"} — проект или пространство недоступны; любой другой 404 — маршрута нет.
+export async function getSystemMap({
+	target,
+	workspaceId,
+	project,
+	element,
+	level,
+	query,
+	timeoutMs = INTENT_TIMEOUT_MS,
+}) {
+	let res;
+	try {
+		res = await fetch(
+			systemMapUrlFromBase(target.url, { workspaceId, project, element, level, query }),
+			{ headers: authHeaders(target), signal: AbortSignal.timeout(timeoutMs) },
+		);
+	} catch (err) {
+		return { kind: "unavailable", error: networkError(err) };
+	}
+	const payload = await readJson(res);
+	if (res.ok && typeof payload?.text === "string") return { kind: "ok", text: payload.text };
+	if (res.status === 404) {
+		return payload?.error === "not found" ? { kind: "not_found" } : { kind: "unsupported" };
+	}
+	if (res.status === 409) {
+		return {
+			kind: "ambiguous",
+			workspaces: Array.isArray(payload?.workspaces) ? payload.workspaces : [],
+		};
+	}
+	if (res.status === 403) return { kind: "forbidden" };
+	if (res.status === 400) return { kind: "invalid", error: payload?.error ?? "неверный запрос" };
+	return { kind: "unavailable", error: `HTTP ${res.status}` };
+}
+
+// Инструменты архитектора (спека ai-architect §4.4, §5): ответ { status, text } — status ok | queued |
+// no_map | unavailable приходит с 200 и несёт готовый текст для агента. 404 с телом роута
+// {error:"not found"} — проект недоступен, {error:"Feature not found"|"Task not found", reason} —
+// нет фичи или задачи; любой другой 404 — маршрута нет (старое облако).
+const ARCHITECTURE_ENTITY_NOT_FOUND = ["Feature not found", "Task not found"];
+
+async function classifyArchitectureResponse(res) {
+	const payload = await readJson(res);
+	if (res.ok && typeof payload?.text === "string") {
+		return { kind: "ok", status: payload.status ?? "ok", text: payload.text };
+	}
+	if (res.status === 404) {
+		if (payload?.error === "not found") return { kind: "no_project" };
+		if (ARCHITECTURE_ENTITY_NOT_FOUND.includes(payload?.error)) {
+			return {
+				kind: "not_found",
+				reason: typeof payload?.reason === "string" ? payload.reason : null,
+			};
+		}
+		return { kind: "unsupported" };
+	}
+	if (res.status === 409) {
+		return {
+			kind: "ambiguous",
+			workspaces: Array.isArray(payload?.workspaces) ? payload.workspaces : [],
+		};
+	}
+	if (res.status === 403) return { kind: "forbidden" };
+	if (res.status === 400) return { kind: "invalid", error: payload?.error ?? "неверный запрос" };
+	return { kind: "unavailable", error: `HTTP ${res.status}` };
+}
+
+async function fetchArchitecture(url, init, timeoutMs) {
+	let res;
+	try {
+		res = await fetch(url, { ...init, signal: AbortSignal.timeout(timeoutMs) });
+	} catch (err) {
+		return { kind: "unavailable", error: networkError(err) };
+	}
+	return classifyArchitectureResponse(res);
+}
+
+export function getArchitectureReview({
+	target,
+	workspaceId,
+	project,
+	slug,
+	timeoutMs = INTENT_TIMEOUT_MS,
+}) {
+	return fetchArchitecture(
+		architectureReviewUrlFromBase(target.url, { workspaceId, project, slug }),
+		{ headers: authHeaders(target) },
+		timeoutMs,
+	);
+}
+
+export function postArchitectureReview({
+	target,
+	workspaceId,
+	project,
+	text,
+	title,
+	timeoutMs = ARCHITECTURE_TEXT_TIMEOUT_MS,
+}) {
+	return fetchArchitecture(
+		architectureReviewTextUrlFromBase(target.url),
+		{
+			method: "POST",
+			headers: authHeaders(target, { "content-type": "application/json" }),
+			body: JSON.stringify({ workspaceId, project, text, ...(title ? { title } : {}) }),
+		},
+		timeoutMs,
+	);
+}
+
+export function getArchitectureCheck({
+	target,
+	workspaceId,
+	project,
+	taskId,
+	timeoutMs = INTENT_TIMEOUT_MS,
+}) {
+	return fetchArchitecture(
+		architectureCheckUrlFromBase(target.url, { workspaceId, project, taskId }),
+		{ headers: authHeaders(target) },
+		timeoutMs,
+	);
+}
+
 export async function postFeatureQuestionAnswer({ target, body, timeoutMs = INTENT_TIMEOUT_MS }) {
 	let res;
 	try {
@@ -656,14 +817,20 @@ export function formatThreadMessage(message) {
 	return note ? `${author} (${note}): ${body}` : `${author}: ${body}`;
 }
 
+const QUESTION_ROLE_RU = { ARCHITECT: "архитектор", PRODUCT: "продакт" };
+
 export function formatFeatureQuestions({ project, slug }, body) {
 	const title = body?.feature?.title ? ` «${body.feature.title}»` : "";
 	const link = body?.feature?.url ? ` — ${body.feature.url}` : "";
 	const head = `Фича ${project}/${slug}${title}${link}`;
 	const questions = body?.questions ?? [];
-	if (questions.length === 0) return `${head}\nУ фичи нет вопросов AI-продакта`;
+	if (questions.length === 0) return `${head}\nУ фичи нет вопросов AI-продакта и архитектора`;
 	const blocks = questions.map((q) => {
-		const lines = [`Вопрос ${q.id} — ${formatQuestionStatus(q.status)}`, q.text];
+		const role = QUESTION_ROLE_RU[q.role];
+		const lines = [
+			`Вопрос ${q.id} — ${formatQuestionStatus(q.status)}${role ? `, ${role}` : ""}`,
+			q.text,
+		];
 		if (q.url) lines.push(`ссылка: ${q.url}`);
 		const thread = q.thread ?? [];
 		if (thread.length > 0) {

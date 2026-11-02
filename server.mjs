@@ -75,13 +75,17 @@ import {
 	formatFeatureQuestions,
 	formatPublishRejection,
 	formatPublishResult,
+	getArchitectureCheck,
+	getArchitectureReview,
 	getFeatureQuestions,
+	getSystemMap,
 	formatSyncWarning,
 	formatTakeContext,
 	formatTakeRejection,
 	formatWorkLogResult,
 	formatWhen,
 	parseJournalAt,
+	postArchitectureReview,
 	postFeatureQuestionAnswer,
 	postIntentPublish,
 	postIntentRelease,
@@ -381,6 +385,8 @@ function featureQuestionsTarget(project) {
 	return { target, row };
 }
 
+const SYSTEM_MAP_LEVELS = ["context", "container", "component", "entity"];
+
 function featureQuestionsFailure(tool, row, result) {
 	switch (result.kind) {
 		case "rejected":
@@ -397,6 +403,56 @@ function featureQuestionsFailure(tool, row, result) {
 		}
 		default:
 			return `облако недоступно: ${result.error}; повторите ${tool} позже`;
+	}
+}
+
+function systemMapFailure(project, row, result) {
+	switch (result.kind) {
+		case "not_found":
+			return `проект ${project} не найден в облаке или нет доступа к его пространству`;
+		case "ambiguous":
+			return `проект ${project} есть в нескольких пространствах (${result.workspaces.join(", ")}) — привяжите его к одному через register_project с cloud_workspace_id`;
+		case "forbidden":
+			return `нет доступа к пространству ${row.cloud_workspace_id} (403)`;
+		case "unsupported":
+			return "облако не поддерживает system_map (старая версия сервера)";
+		case "invalid":
+			return `облако отклонило system_map: ${result.error}`;
+		default:
+			return `облако недоступно: ${result.error}; повторите system_map позже`;
+	}
+}
+
+// Архитектор (спека ai-architect §5): отказ облака, нет карты, облако не настроено — текст для агента,
+// не ошибка протокола: скиллы /brief, /feature и /accept продолжают работу без блока «Архитектура».
+function architectureFailure(tool, project, result) {
+	switch (result.kind) {
+		case "no_project":
+			return `проект ${project} не найден в облаке или нет доступа к его пространству`;
+		case "not_found":
+			return result.reason ?? "не найдено в облаке";
+		case "ambiguous":
+			return `проект ${project} есть в нескольких пространствах (${result.workspaces.join(", ")}) — привяжите его к одному через register_project с cloud_workspace_id`;
+		case "forbidden":
+			return `нет доступа к ${tool} (403): для разбора текста нужен токен с правом записи`;
+		case "unsupported":
+			return `облако не поддерживает ${tool} (старая версия сервера)`;
+		case "invalid":
+			return `облако отклонило ${tool}: ${result.error}`;
+		default:
+			return `облако недоступно: ${result.error}; повторите ${tool} позже`;
+	}
+}
+
+// Обёртка: любой сбой подготовки или запроса становится строкой «Архитектура: <причина>».
+async function architectureAnswer(tool, project, run) {
+	try {
+		const resolved = featureQuestionsTarget(project);
+		const result = await run(resolved);
+		if (result.kind === "ok") return result.text;
+		return `Архитектура: ${architectureFailure(tool, project, result)}`;
+	} catch (err) {
+		return `Архитектура: ${err.message}`;
 	}
 }
 
@@ -2169,6 +2225,134 @@ const TOOLS = [
 		},
 	},
 	{
+		name: "system_map",
+		description:
+			"Карта системы пространства из облака (C4: система, контейнеры, компоненты, сущности домена) " +
+			"текстом. Без element/level/query — контекст и контейнеры. element — ключ элемента: описание, " +
+			"технологии, состав, связи в обе стороны, источники. level — все элементы уровня. query — поиск " +
+			"по словам запроса (имя, описание, технологии). Приоритет: element, затем query, затем level. " +
+			"Элемент с пометкой «по истории — проверьте» не подтверждён человеком. Только чтение; карту " +
+			"собирают и правят на странице «Система» в облаке.",
+		inputSchema: {
+			type: "object",
+			properties: {
+				project: { type: "string", description: "Проект журнала (с cloud_workspace_id)" },
+				element: { type: "string", description: "Ключ элемента карты, например backend_api" },
+				level: {
+					type: "string",
+					enum: ["context", "container", "component", "entity"],
+					description: "Уровень: context, container, component или entity (сущности домена)",
+				},
+				query: { type: "string", description: "Слова для поиска по карте" },
+			},
+			required: ["project"],
+		},
+		handler: async ({ project, element, level, query }) => {
+			if (level !== undefined && !SYSTEM_MAP_LEVELS.includes(level)) {
+				throw new Error(
+					`level: ожидается одно из ${SYSTEM_MAP_LEVELS.join(" | ")}, получено «${level}»`,
+				);
+			}
+			const { target, row } = featureQuestionsTarget(project);
+			const result = await getSystemMap({
+				target,
+				workspaceId: row.cloud_workspace_id,
+				project,
+				element,
+				level,
+				query,
+				timeoutMs: INBOX_TIMEOUT,
+			});
+			if (result.kind === "ok") return result.text;
+			throw new Error(systemMapFailure(project, row, result));
+		},
+	},
+	{
+		name: "architecture_review",
+		description:
+			"Разбор фичи AI-архитектором из облака: затронутые компоненты и сущности карты системы, " +
+			"действующие ADR, конфликты, риски и вопросы архитектора (со статусами и id для " +
+			"feature_questions / answer_question). Ровно одно из: slug — сохранённый разбор опубликованной " +
+			"фичи (текст фичи изменился или разбора нет — облако ставит свежий в очередь, ответ «поставлен в " +
+			"очередь», повторите через минуту); text — синхронный разбор черновика брифа без записи (до " +
+			"полутора минут). Нет карты системы, AI выключен или облако недоступно — вернёт строку " +
+			"«Архитектура: <причина>» (или текст про карту), не ошибку: работу продолжайте без блока. " +
+			"Только чтение.",
+		inputSchema: {
+			type: "object",
+			properties: {
+				project: { type: "string", description: "Проект журнала (с cloud_workspace_id)" },
+				slug: { type: "string", description: "Slug опубликованной фичи (ключ вместе с project)" },
+				text: { type: "string", description: "Текст черновика брифа для разбора без записи" },
+				title: { type: "string", description: "Название фичи для text (необязательно)" },
+			},
+			required: ["project"],
+		},
+		handler: async ({ project, slug, text, title }) => {
+			const hasSlug = typeof slug === "string" && slug.trim() !== "";
+			const hasText = typeof text === "string" && text.trim() !== "";
+			if (hasSlug === hasText) {
+				throw new Error(
+					hasSlug
+						? "architecture_review: передайте либо slug, либо text, не оба сразу"
+						: "architecture_review: нужен ровно один из параметров — slug (опубликованная фича) или text (черновик брифа)",
+				);
+			}
+			return architectureAnswer("architecture_review", project, ({ target, row }) =>
+				hasSlug
+					? getArchitectureReview({
+							target,
+							workspaceId: row.cloud_workspace_id,
+							project,
+							slug: slug.trim(),
+							timeoutMs: INBOX_TIMEOUT,
+						})
+					: postArchitectureReview({
+							target,
+							workspaceId: row.cloud_workspace_id,
+							project,
+							text,
+							title,
+						}),
+			);
+		},
+	},
+	{
+		name: "architecture_check",
+		description:
+			"Для приёмки: действующие ADR элементов карты, которых касается задача журнала, — с текстом " +
+			"«Решения» и строкой «Искать в диффе: …» (идентификаторы из решения), плюс открытые вопросы " +
+			"архитектора и открытые расхождения прошлых приёмок фичи. Без AI: сверку с диффом делаете вы, " +
+			"итог — строка architecture: вердикта. Проект берётся из префикса task_id (project/…). Нет карты " +
+			"или облако недоступно — вернёт строку «Архитектура: <причина>», приёмку продолжайте без блока. " +
+			"Только чтение.",
+		inputSchema: {
+			type: "object",
+			properties: {
+				task_id: { type: "string", description: "Id задачи журнала вида project/дата-slug" },
+			},
+			required: ["task_id"],
+		},
+		handler: async ({ task_id }) => {
+			const slash = typeof task_id === "string" ? task_id.indexOf("/") : -1;
+			if (slash <= 0) {
+				throw new Error(
+					`architecture_check: task_id вида project/дата-slug, получено «${task_id ?? ""}»`,
+				);
+			}
+			const project = task_id.slice(0, slash);
+			return architectureAnswer("architecture_check", project, ({ target, row }) =>
+				getArchitectureCheck({
+					target,
+					workspaceId: row.cloud_workspace_id,
+					project,
+					taskId: task_id,
+					timeoutMs: INBOX_TIMEOUT,
+				}),
+			);
+		},
+	},
+	{
 		name: "answer_question",
 		description:
 			"Ответить на вопрос AI-продакта по фиче: текст попадает в ветку вопроса, вопрос становится " +
@@ -2422,6 +2606,8 @@ const PROTOCOL_INSTRUCTIONS = `Журнал задач для AI-агентов 
 Продолжение закрытой задачи — новая задача + link_tasks kind=continues; найденная по ходу работа — новая задача + discovered_from. Rework-цикл живёт только внутри незакрытой задачи.
 Статусы меняются только через события журнала (инструменты), не через базу.
 Намерения облака: inbox → take → draft_task с intent_task_id. Человек может отменить, закрыть или забрать намерение и поменять критерии — сервер откажет в акте и скажет почему; intent_status показывает состояние, release_intent отпускает взятое. Фича из локального флоу: publish_intent { project, slug, title, text, acceptance_criteria } создаёт или обновляет в облаке фичу с намерением (ключ project+slug), дальше take.
+Карта системы пространства (C4 и домен): system_map { project, element?, level?, query? } — уровень, элемент со связями или поиск; только чтение, собирается в облаке на странице «Система».
+Архитектор: architecture_review { project, slug | text } — разбор фичи (затронутые элементы карты, действующие ADR, конфликты, вопросы архитектора) по опубликованной фиче или по черновику брифа; architecture_check { task_id } — действующие ADR затронутых элементов для приёмки (с маркерами «Искать в диффе»). Вопросы архитектора видны в feature_questions с ролью «архитектор», отвечать на них — answer_question. Нет карты или AI выключен — ответ-строка «Архитектура: <причина>», работа продолжается без блока.
 Выпуск на прод — record_release (событие Released, не привязано к задаче) с notes — название и фраза «что нового» на каждый пункт; после sync облако рассылает уведомление.`;
 
 // Инструкции собираются на каждом initialize: политика и предупреждения — по

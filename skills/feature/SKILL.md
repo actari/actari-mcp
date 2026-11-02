@@ -39,7 +39,8 @@ Without a registered project the journal refuses every task and artifact.
 
 ## 2. Intent
 
-This is the **only stop before acceptance**. Do not ask anything else.
+This is the **only stop before acceptance** for the person's decision. The one
+other stop is open architect questions in step 3b. Do not ask anything else.
 
 Show the person, in a few lines:
 
@@ -73,6 +74,30 @@ For "take it from actari": `inbox` lists the intents waiting for you.
 `take` returns the intent, its acceptance criteria and `intent_task_id`. Use
 them as they are: the person already wrote the intent, so skip step 2 and
 do not publish your own.
+
+## 3b. Architecture
+
+After the intent exists (step 2 or 3) and before any task is cut:
+`architecture_review { project, slug }` with the intent slug. The answer is
+a text with a status. Treat it as input to the decisions below.
+
+- `status: ok` — put the answer into the task texts as a section `## Архитектура`
+  (and into the spec, if the project keeps one). Valid ADRs and conflicts
+  in it bind your decisions: do not contradict a valid ADR; if the feature
+  must, say so and plan a replacing ADR.
+- Open questions from the architect — **stop**. Show the questions as they
+  are and say "ответьте на вкладке «Архитектура» фичи или ответом боту".
+  Cut no tasks while they are open. After the answers, call
+  `architecture_review` again and put the answers into the section.
+- `status: queued` — the cloud is still working: repeat up to 3 times with 60 s
+  between, then go on without the block.
+- `status: no_map`, `status: not_found`, `status: unavailable`, a cloud refusal, no such tool, or a
+  feature worked locally — go on without the block; write one line with the
+  reason into the summary (step 6).
+
+Acceptance later asks `architecture_check` for the same elements (step 5).
+A new ADR you record in step 4 is tied to the map elements it touches; if
+it replaces an old one, the cloud proposes the replacement to the owner.
 
 ## 4. Tasks
 
@@ -132,14 +157,20 @@ verdict.
 With subagents available, start a separate subagent that has none of your
 context. Give it only: the `task_id`, the acceptance criteria, and the
 commands that check them. It reads the report with `get_task { task_id,
-full: true }` and the diff, runs the checks itself, and answers in a fixed
-form:
+full: true }`, calls `architecture_check { task_id }` (valid ADRs of the
+touched elements and what to look for in the diff) before the diff, then
+reads the diff, runs the checks itself, and answers in a fixed form:
 
 ```
 verdict: accept | rework | failed
 evidence: <commands run and their result>
+architecture: нет | проверка недоступна — <причина>
+  - adr:<id> — <что расходится> — <блокирует | не блокирует>
 findings: <what is wrong or doubtful, one per line>
 ```
+
+A change that contradicts a valid ADR with no replacing ADR is a finding;
+it blocks unless the task asked to change that decision.
 
 Record the verdict word for word:
 `record_artifact { project, kind: "note", task_id, title: "acceptance: <task_id>", body }`.
