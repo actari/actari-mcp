@@ -203,6 +203,18 @@ Self-acceptance in any other form — accepting because your own run passed,
 or calling a subagent that shares your context a "reviewer" — is not
 acceptance.
 
+## 5b. Documentation
+
+Before the hand-off, a feature that changes visible behaviour updates its own
+public pages: the `content/docs/**` pages the brief names under "Затронутые
+статьи справки", and the landing "Возможности" card if the brief names one.
+Do it in the feature's branch, before the summary and before anything goes to
+release. A change with no visible effect needs no pages.
+
+If you pass the feature on with a `release: <slug>` artifact, put a line in
+its body, right after the package line: `Документация: <content/docs pages> |
+не нужна`.
+
 ## 6. Summary
 
 When every task is accepted, tell the person in a few lines:

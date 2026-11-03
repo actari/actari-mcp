@@ -237,3 +237,16 @@ test("скилл actari описывает architecture_review и architecture_c
 		assert.ok(part.includes(needle), `в разделе Architecture есть ${needle}`);
 	}
 });
+
+test("скилл feature: шаг «Documentation» перед сводкой и строка «Документация:»", () => {
+	const text = readFileSync(join(ROOT, "skills", "feature", "SKILL.md"), "utf8");
+	const at = text.search(/^## 5b\. Documentation$/m);
+	assert.ok(at > text.search(/^## 5\. Acceptance$/m), "шаг 5b идёт после приёмки");
+	assert.ok(at < text.search(/^## 6\. Summary$/m), "шаг 5b идёт до сводки и передачи в релиз");
+
+	const step = section(text, "## 5b. Documentation");
+	for (const needle of ["content/docs", "Документация:", "не нужна"]) {
+		assert.ok(step.includes(needle), `в «5b. Documentation» есть ${needle}`);
+	}
+	assert.ok(text.split("\n").length <= 250, "скилл не длиннее 250 строк");
+});
