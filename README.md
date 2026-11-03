@@ -1,3 +1,5 @@
+<p align="center"><img src="https://actari.dev/brand/icon-192.png?v=01974432" width="72" height="72" alt="Actari"></p>
+
 # actari
 
 [![npm](https://img.shields.io/npm/v/actari-mcp)](https://www.npmjs.com/package/actari-mcp)
