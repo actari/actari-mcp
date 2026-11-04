@@ -309,6 +309,14 @@ test("drop_task: list_tasks и search_precedents находят отменённ
 	);
 });
 
+test("record_release: в описании сказано, что облако закрывает открытый релиз", async (t) => {
+	const c = startClient(t);
+	await c.call("initialize", { protocolVersion: "2024-11-05" });
+	const tool = (await c.call("tools/list")).result.tools.find((x) => x.name === "record_release");
+	assert.ok(tool, "инструмент есть");
+	assert.match(tool.description, /закрывает открытый \(или замороженный\) релиз пространства/);
+});
+
 test("record_release: пишет Released с нормализованным payload", async (t) => {
 	const c = startClient(t);
 	await reg(c, "test");
