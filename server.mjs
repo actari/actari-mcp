@@ -6,7 +6,7 @@
 // Zero deps: node:sqlite (Node >= 22.5).
 
 import { DatabaseSync } from "node:sqlite";
-import { existsSync, mkdirSync, readFileSync, renameSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, statSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -118,10 +118,10 @@ function requireSchemaFile() {
 	return readFileSync(SCHEMA_PATH, "utf8");
 }
 
-// ============ перенос старой схемы переигрыванием ============
+// ============ перенос старой схемы на месте ============
 // Вся база — проекции из events (tasks, projects, artifacts, incidents,
-// task_links собираются триггерами). Смена схемы проекций — не миграция, а
-// новая база + повтор событий по seq. Старый файл остаётся рядом бэкапом.
+// task_links собираются триггерами). Смена схемы — в одной транзакции: снять проекции,
+// пересоздать events, повторить события по seq. Файл базы не подменяется; рядом — бэкап.
 
 function tasksHaveEvidenceColumn(database) {
 	return database
@@ -152,47 +152,103 @@ function migratePayload(type, payloadJson) {
 	return JSON.stringify(payload);
 }
 
-function replayJournal(dbPath, oldDb) {
-	// WAL сливается в основной файл до переименования — иначе хвост уедет в бэкап
-	oldDb.exec("PRAGMA wal_checkpoint(TRUNCATE)");
-	const events = oldDb
-		.prepare("SELECT seq, task_id, type, payload, at FROM events ORDER BY seq")
-		.all();
-	oldDb.close();
-
-	const stamp = new Date().toISOString().replace(/[:.]/g, "-");
-	const backup = `${dbPath}.${stamp}.bak`;
-	renameSync(dbPath, backup);
-	for (const suffix of ["-wal", "-shm"]) {
-		if (existsSync(dbPath + suffix)) rmSync(dbPath + suffix);
-	}
-
-	const fresh = new DatabaseSync(dbPath);
-	fresh.exec(requireSchemaFile());
-	// seq и at сохраняются: курсоры синка и хронология — часть журнала
-	const insert = fresh.prepare(
-		"INSERT INTO events(seq, task_id, type, payload, at) VALUES (?, ?, ?, ?, ?)",
-	);
-	fresh.exec("BEGIN");
-	for (const e of events) {
-		insert.run(e.seq, e.task_id, e.type, migratePayload(e.type, e.payload), e.at);
-	}
-	fresh.exec("COMMIT");
-	console.error(
-		`actari: схема журнала обновлена — перенесено ${events.length} событий, бэкап: ${backup}`,
-	);
-	return fresh;
+function needsEventsMigration(database) {
+	return !tasksHaveEvidenceColumn(database) || !eventsAcceptAllTypes(database);
 }
 
-let db = new DatabaseSync(DB_PATH);
+// Проекции и индекс поиска целиком собираются из events: при смене схемы их снимаем
+// и пересобираем переигрыванием той же транзакцией.
+const REBUILT_TABLES = [
+	"search_fts",
+	"search_vectors",
+	"search_chunks",
+	"search_meta",
+	"task_links",
+	"artifacts",
+	"incidents",
+	"tasks",
+	"projects",
+];
+
+// Обновление схемы НА МЕСТЕ: файл базы остаётся тем же (тот же inode), живые процессы
+// продолжают писать в него — инциденты 93, 152. Возвращает false, если делать нечего
+// (другой процесс уже обновил). Ошибка — ROLLBACK, данные целы, исключение наружу.
+function migrateEventsInPlace(database, dbPath) {
+	database.exec("PRAGMA busy_timeout = 5000");
+	if (!needsEventsMigration(database)) return false;
+
+	// бэкап до любых изменений; VACUUM INTO сам забирает и хвост WAL. Ошибка — отказ без изменений
+	const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+	const backup = `${dbPath}.${stamp}.bak`;
+	database.exec(`VACUUM INTO '${backup.replaceAll("'", "''")}'`);
+
+	const schemaSql = requireSchemaFile();
+	database.exec("BEGIN IMMEDIATE");
+	try {
+		// пока ждали блокировку, другой процесс мог уже обновить схему
+		if (!needsEventsMigration(database)) {
+			database.exec("ROLLBACK");
+			return false;
+		}
+		// seq и at сохраняются: курсоры синка и хронология — часть журнала
+		const events = database
+			.prepare("SELECT seq, task_id, type, payload, at FROM events ORDER BY seq")
+			.all();
+		database.exec("PRAGMA defer_foreign_keys = ON");
+		for (const table of REBUILT_TABLES) database.exec(`DROP TABLE IF EXISTS ${table}`);
+		database.exec("DROP TABLE events"); // триггеры events уходят вместе с таблицей
+		database.exec(schemaSql); // events с новым CHECK, индексы, триггеры, проекции
+		const insert = database.prepare(
+			"INSERT INTO events(seq, task_id, type, payload, at) VALUES (?, ?, ?, ?, ?)",
+		);
+		for (const e of events) {
+			insert.run(e.seq, e.task_id, e.type, migratePayload(e.type, e.payload), e.at);
+		}
+		database.exec("COMMIT");
+		console.error(
+			`actari: схема журнала обновлена на месте — перенесено ${events.length} событий, бэкап: ${backup}`,
+		);
+		return true;
+	} catch (err) {
+		try {
+			database.exec("ROLLBACK");
+		} catch {}
+		throw new Error(
+			`не удалось обновить схему журнала (изменения откатены, данные целы, бэкап: ${backup}): ${err.message}`,
+		);
+	}
+}
+
+// Защита от подмены файла под живым процессом: запись только в тот файл, что открыт при старте.
+const DB_REFUSAL = "журнал обновлён другим процессом — перезапустите сессию";
+let dbIdentity = null;
+function statDbFile() {
+	try {
+		const st = statSync(DB_PATH);
+		return `${st.dev}:${st.ino}`;
+	} catch {
+		return null;
+	}
+}
+function assertSameDatabaseFile() {
+	if (dbIdentity === null || statDbFile() !== dbIdentity) throw new Error(DB_REFUSAL);
+}
+
+const db = new DatabaseSync(DB_PATH);
 const hasEvents = db
 	.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='events'")
 	.get();
 if (!hasEvents) {
 	db.exec(requireSchemaFile());
-} else if (!tasksHaveEvidenceColumn(db) || !eventsAcceptAllTypes(db)) {
-	db = replayJournal(DB_PATH, db);
+} else if (needsEventsMigration(db)) {
+	try {
+		migrateEventsInPlace(db, DB_PATH);
+	} catch (err) {
+		console.error(`actari: ${err.message}`);
+		process.exit(1);
+	}
 }
+dbIdentity = statDbFile();
 
 // Служебные таблицы кэша намерений (спека 2026-09-14 §9.1) — не события.
 db.exec(INTENT_CACHE_DDL);
@@ -263,6 +319,7 @@ function scheduleAutoPush() {
 // Индексация поиска — в той же транзакции, что и событие; сбой индекса не теряет событие
 // (savepoint откатывается, индекс догонит при следующей записи или поиске).
 function appendEvent(taskId, type, payloadJson) {
+	assertSameDatabaseFile();
 	db.exec("BEGIN IMMEDIATE");
 	try {
 		insertEventStmt.run(taskId, type, payloadJson);
